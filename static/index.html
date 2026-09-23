@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>AquaClient — Visites terrain</title>
+  <link rel="icon" href="/static/favicon.ico" sizes="any" />
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+</head>
+<body>
+  <div class="bg-orb bg-orb--1" aria-hidden="true"></div>
+  <div class="bg-orb bg-orb--2" aria-hidden="true"></div>
+  <div class="ripple" aria-hidden="true"></div>
+
+  <header class="top">
+    <button type="button" class="brand" id="btn-home-brand" title="Retour à l’accueil">
+      <img class="brand-logo" src="/static/logo.svg" width="42" height="42" alt="AquaClient" />
+      <span class="brand-text">
+        <span class="brand-name">AquaClient</span>
+        <span class="brand-tag">Visites & interventions</span>
+      </span>
+    </button>
+  </header>
+
+  <main id="app">
+    <section class="screen screen--home screen--active" id="screen-home" data-screen>
+      <div class="home">
+        <p class="home-brand">AquaClient</p>
+        <h1 class="home-title">Sur le terrain</h1>
+        <p class="home-sub">Client proche, liste, factures, carte ou nouveau dossier.</p>
+        <button type="button" class="btn btn--primary btn--home" id="btn-client">
+          Client à proximité
+        </button>
+        <nav class="home-nav" aria-label="Autres accès">
+          <button type="button" class="home-link" id="btn-liste">Liste</button>
+          <button type="button" class="home-link" id="btn-carte">Carte</button>
+          <button type="button" class="home-link" id="btn-agenda">Agenda</button>
+          <button type="button" class="home-link" id="btn-factures">Factures</button>
+          <button type="button" class="home-link" id="btn-nouveau">Nouveau</button>
+        </nav>
+        <p class="hint" id="geo-status"></p>
+      </div>
+    </section>
+
+    <section class="screen" id="screen-confirm" data-screen>
+      <p class="eyebrow" id="confirm-eyebrow">Client à proximité</p>
+      <h2 class="screen-title" id="confirm-name">—</h2>
+      <p class="muted" id="confirm-adresse">—</p>
+      <p class="distance" id="confirm-distance">—</p>
+      <p class="muted" id="confirm-hint" hidden></p>
+      <p class="question">Est-ce bien ce client ?</p>
+      <div class="actions actions--row">
+        <button type="button" class="btn btn--primary" id="btn-valider">Valider</button>
+        <button type="button" class="btn btn--ghost" id="btn-refuser">Non</button>
+      </div>
+      <button type="button" class="btn btn--ghost btn--block" id="btn-modifier-confirm" style="margin-top:0.75rem">
+        Modifier ce client
+      </button>
+    </section>
+
+    <section class="screen" id="screen-type" data-screen>
+      <button type="button" class="back" id="btn-back-type">← Retour</button>
+      <p class="eyebrow">Type d’intervention</p>
+      <h2 class="screen-title" id="type-client-name">—</h2>
+      <p class="muted">Choisissez le type de visite</p>
+      <div class="actions">
+        <button type="button" class="btn btn--primary" data-visite="entretien_simple">Entretien classique</button>
+        <button type="button" class="btn btn--ghost" data-visite="entretien_complet">Entretien complet</button>
+        <button type="button" class="btn btn--ghost" data-visite="depannage">Dépannage</button>
+      </div>
+    </section>
+
+    <section class="screen" id="screen-none" data-screen>
+      <div class="empty-state">
+        <div class="empty-icon" aria-hidden="true">⌀</div>
+        <h2 class="screen-title">Aucun client à proximité</h2>
+        <p class="muted" id="none-detail">Personne dans un rayon de 1 km.</p>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn btn--primary" id="btn-utiliser-proche" hidden>Utiliser le plus proche</button>
+        <button type="button" class="btn btn--ghost" id="btn-liste-depuis-none">Liste clients</button>
+        <button type="button" class="btn btn--ghost" data-goto="home">Retour</button>
+        <button type="button" class="btn btn--ghost" id="btn-nouveau-depuis-none">Nouveau client</button>
+      </div>
+    </section>
+
+    <section class="screen" id="screen-liste" data-screen>
+      <button type="button" class="back" data-goto="home">← Accueil</button>
+      <p class="eyebrow">Tous les clients</p>
+      <h2 class="screen-title">Choisir un client</h2>
+      <div class="liste-toolbar">
+        <label class="toggle toggle--compact">
+          <input type="checkbox" id="chk-select-all" />
+          <span>Tout sélectionner</span>
+        </label>
+        <button type="button" class="btn btn--ghost btn--sm btn--danger" id="btn-supprimer-selection" disabled>
+          Supprimer la sélection
+        </button>
+      </div>
+      <ul class="list list--pick" id="liste-clients"></ul>
+    </section>
+
+    <section class="screen" id="screen-carte" data-screen>
+      <button type="button" class="back" data-goto="home">← Accueil</button>
+      <p class="eyebrow">Localisation</p>
+      <h2 class="screen-title">Carte des clients</h2>
+      <p class="muted" id="carte-status">Chargement de la carte…</p>
+      <div id="carte-clients" class="carte-map" role="img" aria-label="Carte des clients"></div>
+    </section>
+
+    <section class="screen" id="screen-agenda" data-screen>
+      <button type="button" class="back" data-goto="home">← Accueil</button>
+      <p class="eyebrow">Planning</p>
+      <h2 class="screen-title">Agenda des passages</h2>
+      <p class="muted" id="agenda-status">Chargement…</p>
+      <ul class="list list--agenda" id="liste-agenda"></ul>
+    </section>
+
+    <section class="screen" id="screen-factures" data-screen>
+      <button type="button" class="back" data-goto="home">← Accueil</button>
+      <p class="eyebrow">Suivi</p>
+      <h2 class="screen-title">Factures</h2>
+      <p class="muted" id="factures-status">Chargement…</p>
+      <div class="filtre-row" id="factures-filtres" role="tablist" aria-label="Filtres factures">
+        <button type="button" class="filtre-chip is-on" data-filtre="toutes">Toutes</button>
+        <button type="button" class="filtre-chip" data-filtre="dernieres">Dernières</button>
+        <button type="button" class="filtre-chip" data-filtre="non_envoyees">À envoyer</button>
+        <button type="button" class="filtre-chip" data-filtre="envoyees">Envoyées</button>
+        <button type="button" class="filtre-chip" data-filtre="non_payees">Impayées</button>
+        <button type="button" class="filtre-chip" data-filtre="payees">Payées</button>
+      </div>
+      <ul class="list list--factures" id="liste-factures"></ul>
+    </section>
+
+    <section class="screen" id="screen-visite" data-screen>
+      <div class="visite-top">
+        <button type="button" class="back" data-goto="home">← Accueil</button>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-depannage-visite">Dépannage</button>
+      </div>
+      <p class="eyebrow" id="visite-type-label">Visite</p>
+      <h2 class="screen-title" id="visite-name">—</h2>
+      <p class="muted" id="visite-adresse">—</p>
+      <div class="equip-tags" id="visite-equip"></div>
+
+      <div class="chrono-box">
+        <p class="list-title">Temps de prestation</p>
+        <p class="chrono-status" id="chrono-status">Pas encore démarré</p>
+      </div>
+
+      <h3 class="list-title">Check-up</h3>
+      <button type="button" class="btn btn--primary btn--block" id="btn-debut">Début</button>
+      <ul class="checklist" id="checklist"></ul>
+      <button type="button" class="btn btn--ghost btn--block" id="btn-fin" disabled>
+        Fin
+      </button>
+      <p class="muted" id="fin-hint">Cochez toutes les étapes obligatoires pour terminer.</p>
+      <p class="ia-feedback" id="check-feedback" role="status"></p>
+
+      <div class="ia-panel">
+        <div class="ia-header">
+          <span class="ia-dot" aria-hidden="true"></span>
+          <div>
+            <p class="ia-title">Vocal</p>
+            <p class="ia-sub">Ex. « fourniture 2 bidon de chlore le 21 septembre »</p>
+          </div>
+          <span class="rec-cursor" id="rec-cursor" hidden title="Enregistrement"></span>
+        </div>
+        <button type="button" class="btn btn--ghost btn--block" id="btn-ecoute" aria-pressed="false" hidden>
+          Écoute auto
+        </button>
+        <button type="button" class="btn btn--primary btn--block btn-parler" id="btn-parler" hidden>
+          Maintenir pour parler
+        </button>
+        <div class="intent-row" hidden>
+          <button type="button" class="chip" data-intent="note">Note</button>
+          <button type="button" class="chip" data-intent="fourniture">Fourniture</button>
+          <button type="button" class="chip" data-intent="analyse">Analyse</button>
+        </div>
+        <button type="button" class="mic" id="btn-mic" aria-pressed="false" hidden>
+          <span class="mic-pulse" aria-hidden="true"></span>
+          <span class="mic-label" id="mic-label">Micro</span>
+        </button>
+        <div class="vu-meter" id="vu-meter" hidden>
+          <div class="vu-bar" id="vu-bar"></div>
+        </div>
+        <label class="field">
+          <span>Dernière commande</span>
+          <textarea id="ia-texte" rows="2" placeholder="ex. note la piscine est descendue 25 cm" readonly></textarea>
+        </label>
+        <button type="button" class="btn btn--primary btn--block" id="btn-envoyer-ia" hidden>Envoyer</button>
+        <p class="ia-feedback" id="ia-feedback" role="status"></p>
+      </div>
+
+      <div class="lists">
+        <div>
+          <h3 class="list-title">Notes</h3>
+          <ul class="list" id="liste-notes"></ul>
+        </div>
+        <div>
+          <h3 class="list-title">Analyses</h3>
+          <ul class="list" id="liste-analyses"></ul>
+        </div>
+        <div>
+          <h3 class="list-title">Fournitures</h3>
+          <ul class="list" id="liste-fournitures"></ul>
+        </div>
+      </div>
+      <button type="button" class="btn btn--ghost btn--block" id="btn-recaler-gps">Recaler GPS sur ma position</button>
+      <button type="button" class="btn btn--ghost btn--block" id="btn-modifier-visite">Modifier le client</button>
+    </section>
+
+    <section class="screen" id="screen-nouveau" data-screen>
+      <button type="button" class="back" id="btn-back-nouveau">← Accueil</button>
+      <p class="eyebrow" id="nouveau-eyebrow">Enregistrement</p>
+      <h2 class="screen-title" id="nouveau-title">Nouveau client</h2>
+
+      <form id="form-nouveau" class="form" autocomplete="off">
+        <input type="hidden" id="edit-client-id" value="" />
+        <label class="field"><span>Nom</span><input name="nom" required placeholder="Dupont" /></label>
+        <label class="field"><span>Prénom</span><input name="prenom" required placeholder="Jean" /></label>
+        <label class="field field--suggest">
+          <span>Adresse</span>
+          <input name="adresse" id="input-adresse" autocomplete="off" placeholder="Tapez rue + code postal…" />
+          <ul class="suggestions" id="adresse-suggestions" hidden></ul>
+        </label>
+
+        <div class="gps-box">
+          <p class="field-label">Coordonnées GPS (manuel ou suggestion)</p>
+          <div class="gps-row">
+            <label class="field"><span>Latitude</span><input name="latitude" id="input-lat" inputmode="decimal" placeholder="49.169809" /></label>
+            <label class="field"><span>Longitude</span><input name="longitude" id="input-lon" inputmode="decimal" placeholder="-0.123036" /></label>
+          </div>
+          <button type="button" class="btn btn--ghost btn--block" id="btn-gps-actuel">Utiliser ma position GPS</button>
+        </div>
+
+        <p class="field-label">Type d’entretien contractuel</p>
+        <div class="toggle-row" role="radiogroup" aria-label="Type d’entretien">
+          <label class="toggle">
+            <input type="radio" name="type_entretien" value="entretien_simple" checked />
+            <span>Entretien classique</span>
+          </label>
+          <label class="toggle">
+            <input type="radio" name="type_entretien" value="entretien_complet" />
+            <span>Entretien complet</span>
+          </label>
+        </div>
+
+        <div id="bloc-passage" class="bloc-passage" hidden>
+          <p class="field-label">Calendrier de passage</p>
+          <div class="toggle-row" role="radiogroup" aria-label="Fréquence">
+            <label class="toggle">
+              <input type="radio" name="frequence_passage" value="hebdomadaire" />
+              <span>1× par semaine</span>
+            </label>
+            <label class="toggle">
+              <input type="radio" name="frequence_passage" value="bihebdomadaire" />
+              <span>1× toutes les 2 semaines</span>
+            </label>
+          </div>
+          <label class="field">
+            <span>Date du premier passage</span>
+            <input type="date" name="date_debut_passage" id="input-date-passage" />
+          </label>
+          <p class="muted" id="passage-preview"></p>
+        </div>
+
+        <p class="field-label">Équipements piscine (optionnel)</p>
+        <label class="field"><span>Pompe</span><input name="pompe" placeholder="ex. Speedeo 1.5 CV" /></label>
+        <label class="field"><span>Filtre</span><input name="filtre" placeholder="ex. sable / cartouche" /></label>
+        <label class="field"><span>Robot</span><input name="robot" placeholder="ex. Dolphin" /></label>
+        <label class="field"><span>Skimmer</span><input name="skimmer" placeholder="" /></label>
+        <label class="field"><span>Autres</span><input name="autres" placeholder="électrolyseur, couverture…" /></label>
+
+        <div class="toggle-row">
+          <label class="toggle">
+            <input type="checkbox" name="vanne_vidange" id="chk-vanne" />
+            <span>Vanne de vidange</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" name="injecteurs" id="chk-injecteurs" />
+            <span>Injecteurs</span>
+          </label>
+        </div>
+
+        <button type="submit" class="btn btn--primary btn--block" id="btn-submit-nouveau">Enregistrer</button>
+        <button type="button" class="btn btn--ghost btn--block btn--danger" id="btn-supprimer-client" hidden>
+          Supprimer ce client
+        </button>
+        <p class="ia-feedback" id="nouveau-feedback" role="status"></p>
+      </form>
+    </section>
+
+    <section class="screen" id="screen-loading" data-screen>
+      <div class="loader" aria-hidden="true"></div>
+      <p class="muted" id="loading-text">Chargement…</p>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

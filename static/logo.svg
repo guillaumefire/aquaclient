@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-label="AquaClient">
+  <defs>
+    <linearGradient id="ac-bg" x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2DD4BF"/>
+      <stop offset="0.55" stop-color="#0F766E"/>
+      <stop offset="1" stop-color="#0A4F4A"/>
+    </linearGradient>
+    <linearGradient id="ac-wave" x1="12" y1="32" x2="52" y2="48" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#B8F0E8" stop-opacity="0.85"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#ac-bg)"/>
+  <path d="M14 28c4-6 8-6 12 0s8 6 12 0 8-6 12 0" stroke="url(#ac-wave)" stroke-width="3.2" stroke-linecap="round" fill="none"/>
+  <path d="M14 40c4-6 8-6 12 0s8 6 12 0 8-6 12 0" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="2.6" stroke-linecap="round" fill="none"/>
+  <circle cx="46" cy="18" r="4.5" fill="#FFFFFF" fill-opacity="0.35"/>
+</svg>
