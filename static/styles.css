@@ -1644,3 +1644,32 @@ body:has(#screen-home.screen--active) .brand-tag {
     flex: 1;
   }
 }
+
+.app-footer {
+  position: relative;
+  z-index: 1;
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 0.35rem var(--pad) 1.4rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-soft);
+}
+
+.footer-sep {
+  opacity: 0.45;
+}
+
+#footer-storage.is-cloud {
+  color: var(--teal-deep);
+}
+
+#footer-storage.is-local {
+  color: #9a3412;
+}

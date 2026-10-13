@@ -63,7 +63,7 @@
     if (options.body && !(options.body instanceof FormData)) {
       headers["Content-Type"] = "application/json";
     }
-    const res = await fetch(path, { ...options, headers });
+    const res = await fetch(path, { ...options, headers, cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail = data.detail;
@@ -71,6 +71,37 @@
     }
     return data;
   }
+
+  async function refreshFooter() {
+    const verEl = $("#footer-version");
+    const storEl = $("#footer-storage");
+    const cliEl = $("#footer-clients");
+    try {
+      const h = await api("/api/health");
+      if (verEl) verEl.textContent = `v${h.version || "?"}`;
+      if (storEl) {
+        storEl.textContent = h.storage === "supabase" ? "Supabase" : "CSV local";
+        storEl.classList.toggle("is-cloud", h.storage === "supabase");
+        storEl.classList.toggle("is-local", h.storage !== "supabase");
+      }
+      if (cliEl) {
+        cliEl.textContent =
+          typeof h.clients === "number" && h.clients >= 0
+            ? `${h.clients} client${h.clients > 1 ? "s" : ""}`
+            : "clients ?";
+      }
+      document.documentElement.dataset.appVersion = h.version || "";
+      document.documentElement.dataset.storage = h.storage || "";
+    } catch {
+      if (storEl) {
+        storEl.textContent = "hors ligne";
+        storEl.classList.add("is-local");
+      }
+    }
+  }
+
+  refreshFooter();
+  setInterval(refreshFooter, 30000);
 
   function getPosition() {
     return new Promise((resolve, reject) => {
@@ -440,6 +471,7 @@
     try {
       const clients = await api("/api/clients");
       ul.innerHTML = "";
+      refreshFooter();
       if (!clients.length) {
         ul.innerHTML = '<li class="empty">Aucun client</li>';
         syncSelectionToolbar();
@@ -1933,12 +1965,14 @@
         method: editId ? "PUT" : "POST",
         body: JSON.stringify(payload),
       });
+      const where = client.storage === "supabase" ? "Supabase" : "CSV local";
       setFeedback(
         $("#nouveau-feedback"),
-        editId ? "Client mis à jour." : "Client enregistré.",
+        editId ? `Client mis à jour (${where}).` : `Client enregistré sur ${where}.`,
         true
       );
       clientActif = client;
+      refreshFooter();
       if (editId) {
         remplirFormClient(client);
         afficherCredentials(client);

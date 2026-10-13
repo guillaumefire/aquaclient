@@ -20,7 +20,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,9 @@ import supabase_db
 
 load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
+
+# Incrémenter à chaque déploiement visible (PC + téléphone doivent afficher la même)
+APP_VERSION = "1.3.0"
 
 DATA_DIR = Path(__file__).parent / "data"
 CLIENTS_CSV = DATA_DIR / "clients.csv"
@@ -1445,7 +1448,9 @@ async def suggere_adresses(q: str = ""):
 
 @app.get("/api/clients")
 def list_clients():
-    return [row_client(r) for r in read_csv(CLIENTS_CSV)]
+    """Liste toujours depuis le stockage actif (Supabase si connecté)."""
+    rows = read_csv(CLIENTS_CSV)
+    return [row_client(r) for r in rows]
 
 
 @app.get("/api/agenda")
@@ -1549,7 +1554,9 @@ async def create_client(body: NouveauClient):
     }
     rows.append(row)
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
-    return row_client(row, password_clair=password_clair)
+    out = row_client(row, password_clair=password_clair)
+    out["storage"] = "supabase" if supabase_db.enabled() else "csv"
+    return out
 
 
 @app.put("/api/clients/{client_id}")
@@ -2220,12 +2227,25 @@ async def transcribe(audio: UploadFile = File(...)):
 
 @app.get("/api/health")
 def health():
+    storage = "supabase" if supabase_db.enabled() else "csv"
+    clients_n = 0
+    try:
+        clients_n = len(read_csv(CLIENTS_CSV))
+    except Exception:
+        clients_n = -1
     return {
         "ok": True,
-        "storage": "supabase" if supabase_db.enabled() else "csv",
+        "version": APP_VERSION,
+        "storage": storage,
+        "clients": clients_n,
         "supabase_configured": supabase_db.configured(),
         "supabase_auth_admin": supabase_db.has_service_role(),
     }
+
+
+@app.get("/api/version")
+def version():
+    return {"version": APP_VERSION, "storage": "supabase" if supabase_db.enabled() else "csv"}
 
 
 @app.post("/api/admin/init-supabase")
@@ -2266,12 +2286,30 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def no_cache_api_and_index(request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/") or path == "/" or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.get("/")
 def index():
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="Frontend manquant")
-    return FileResponse(index_path)
+    html = index_path.read_text(encoding="utf-8")
+    # Cache-bust assets + version injectée pour PC = téléphone
+    html = html.replace("/static/styles.css", f"/static/styles.css?v={APP_VERSION}")
+    html = html.replace("/static/app.js", f"/static/app.js?v={APP_VERSION}")
+    html = html.replace("__APP_VERSION__", APP_VERSION)
+    return HTMLResponse(
+        content=html,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/favicon.ico")
