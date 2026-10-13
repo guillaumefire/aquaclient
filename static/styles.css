@@ -1682,6 +1682,115 @@ body:has(#screen-home.screen--active) .brand-tag {
   color: #9a3412;
 }
 
+/* ── Dashboard ── */
+.dash-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0.85rem 0 1rem;
+}
+
+.dash-stat {
+  padding: 0.85rem 0.9rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: var(--surface);
+  display: grid;
+  gap: 0.15rem;
+}
+
+.dash-stat strong {
+  font-family: var(--font-display);
+  font-size: 1.45rem;
+  font-weight: 600;
+  color: var(--teal-deep);
+}
+
+.dash-stat span {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+.dash-stat--warn strong {
+  color: var(--danger);
+}
+
+.dash-stat--ok strong {
+  color: var(--teal);
+}
+
+.list--dashboard {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0;
+  margin: 0.75rem 0 0;
+  list-style: none;
+}
+
+.dash-item {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.85rem 0.9rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  background: var(--surface);
+}
+
+.dash-main {
+  display: grid;
+  gap: 0.25rem;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.dash-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.2rem;
+}
+
+.dash-flag {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0.2rem 0.45rem;
+  border-radius: 8px;
+  background: rgba(4, 28, 34, 0.06);
+  color: var(--ink-soft);
+}
+
+.dash-flag--debt {
+  background: rgba(194, 65, 12, 0.14);
+  color: var(--danger);
+}
+
+.dash-flag--ok {
+  background: rgba(46, 207, 192, 0.18);
+  color: var(--teal-deep);
+}
+
+.dash-flag--ice {
+  background: rgba(14, 116, 144, 0.16);
+  color: #0e7490;
+}
+
+.dash-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
 /* ── Éditeur checklist hivernage + photos ── */
 .hiv-editor {
   display: grid;

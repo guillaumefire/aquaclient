@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -64,7 +64,7 @@ CLIENT_FIELDS = [
     "pompe", "filtre", "robot", "skimmer", "vanne_vidange", "injecteurs", "autres",
     "type_entretien", "frequence_passage", "date_debut_passage",
     "identifiant", "email", "telephone", "password_hash", "compte_actif", "auth_uid",
-    "checklist_hivernage",
+    "checklist_hivernage", "piscine_hivernee",
 ]
 
 DEFAULT_CHECKLIST_HIVERNAGE = [
@@ -295,8 +295,9 @@ class NouveauClient(BaseModel):
     email: str = ""
     telephone: str = ""
     password: str = ""  # clair à l'enregistrement ; stocké hashé
-    # Checklist hivernage : libellés ou {id, label}
+    # Checklist hivernage : libellés ou {id, label} (vide autorisé)
     checklist_hivernage: list[Any] = Field(default_factory=list)
+    piscine_hivernee: bool | None = None
 
 
 class ModifierClient(BaseModel):
@@ -320,6 +321,7 @@ class ModifierClient(BaseModel):
     telephone: str = ""
     password: str = ""  # si non vide → nouveau mot de passe
     checklist_hivernage: list[Any] = Field(default_factory=list)
+    piscine_hivernee: bool | None = None
 
 class Position(BaseModel):
     latitude: float
@@ -699,7 +701,7 @@ def migrate_checklist_hivernage_ids() -> None:
         raw = r.get("checklist_hivernage")
         if not checklist_storage_needs_ids(raw):
             continue
-        steps = parse_checklist_hivernage(raw) or default_checklist_hivernage_items()
+        steps = parse_checklist_hivernage(raw)
         r["checklist_hivernage"] = serialize_checklist_hivernage(steps)
         changed = True
     if changed:
@@ -1016,10 +1018,8 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         "has_password": bool(
             (r.get("password_hash") or "").strip() or (r.get("auth_uid") or "").strip()
         ),
-        "checklist_hivernage": (
-            parse_checklist_hivernage(r.get("checklist_hivernage"))
-            or default_checklist_hivernage_items()
-        ),
+        "checklist_hivernage": parse_checklist_hivernage(r.get("checklist_hivernage")),
+        "piscine_hivernee": from_bool_csv(r.get("piscine_hivernee", "")),
     }
     if password_clair:
         out["password_clair"] = password_clair
@@ -1700,8 +1700,6 @@ def build_checklist(client: dict[str, Any], type_visite: str) -> list[dict[str, 
         add("note_finale", "Note de visite", optional=True)
     elif type_visite == "hivernage":
         steps = parse_checklist_hivernage(client.get("checklist_hivernage"))
-        if not steps:
-            steps = default_checklist_hivernage_items()
         photos_by_inst: dict[str, list[dict[str, Any]]] = {}
         try:
             cid = int(client.get("id") or 0)
@@ -1898,9 +1896,8 @@ async def create_client(body: NouveauClient):
         "password_hash": password_hash,
         "compte_actif": compte_actif,
         "auth_uid": auth_uid,
-        "checklist_hivernage": serialize_checklist_hivernage(
-            body.checklist_hivernage or default_checklist_hivernage_items()
-        ),
+        "checklist_hivernage": serialize_checklist_hivernage(body.checklist_hivernage or []),
+        "piscine_hivernee": bool_csv(bool(body.piscine_hivernee)),
     }
     rows.append(row)
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
@@ -2023,6 +2020,11 @@ async def update_client(client_id: int, body: ModifierClient):
             body.checklist_hivernage
             if body.checklist_hivernage is not None
             else parse_checklist_hivernage(target.get("checklist_hivernage"))
+        ),
+        "piscine_hivernee": bool_csv(
+            bool(body.piscine_hivernee)
+            if body.piscine_hivernee is not None
+            else from_bool_csv(target.get("piscine_hivernee", ""))
         ),
     })
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
@@ -2351,6 +2353,18 @@ def fin_prestation(visite_id: int):
             minutes = round((fin - debut).total_seconds() / 60, 1)
             r["duree_minutes"] = str(minutes)
             write_csv(VISITES_CSV, VISITE_FIELDS, rows)
+            # Fin d'hivernage → marque la piscine comme hivernée
+            if (r.get("type") or "") == "hivernage":
+                try:
+                    cid = int(r["client_id"])
+                    clients = read_csv(CLIENTS_CSV)
+                    for c in clients:
+                        if int(c["id"]) == cid:
+                            c["piscine_hivernee"] = "1"
+                            write_csv(CLIENTS_CSV, CLIENT_FIELDS, clients)
+                            break
+                except Exception:
+                    pass
             return _visite_payload(r)
     raise HTTPException(status_code=404, detail="Visite introuvable")
 
@@ -2550,6 +2564,88 @@ def _facture_enrichie(row: dict[str, str], clients_by_id: dict[int, dict[str, st
         "envoyee": _norm_oui_non(row.get("envoyee")),
         "payee": _norm_oui_non(row.get("payee")),
     }
+
+
+@app.get("/api/dashboard")
+def dashboard_overview():
+    """Vue d'ensemble : clients, impayés, statut hivernage."""
+    clients_raw = read_csv(CLIENTS_CSV)
+    factures = read_csv(FOURNITURES_CSV)
+    visites = read_csv(VISITES_CSV)
+
+    unpaid_by: dict[int, int] = {}
+    amount_hint_by: dict[int, int] = {}
+    for f in factures:
+        try:
+            cid = int(f.get("client_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if _norm_oui_non(f.get("payee")) == "oui":
+            continue
+        unpaid_by[cid] = unpaid_by.get(cid, 0) + 1
+        amount_hint_by[cid] = amount_hint_by.get(cid, 0) + 1
+
+    last_hiv_by: dict[int, str] = {}
+    last_visite_by: dict[int, str] = {}
+    for v in visites:
+        try:
+            cid = int(v.get("client_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        date = (v.get("date") or v.get("fin") or "")[:16]
+        if date and (cid not in last_visite_by or date > last_visite_by[cid]):
+            last_visite_by[cid] = date
+        if (v.get("type") or "") == "hivernage" and (v.get("fin") or "").strip():
+            fin = (v.get("fin") or date)[:16]
+            if fin and (cid not in last_hiv_by or fin > last_hiv_by[cid]):
+                last_hiv_by[cid] = fin
+
+    rows: list[dict[str, Any]] = []
+    for r in clients_raw:
+        c = row_client(r)
+        cid = c["id"]
+        unpaid = unpaid_by.get(cid, 0)
+        rows.append({
+            "id": cid,
+            "nom": c["nom"],
+            "prenom": c["prenom"],
+            "label": f'{c["prenom"]} {c["nom"]}'.strip(),
+            "adresse": c["adresse"],
+            "piscine_hivernee": bool(c.get("piscine_hivernee")),
+            "factures_impayees": unpaid,
+            "a_impaye": unpaid > 0,
+            "derniere_visite": last_visite_by.get(cid) or None,
+            "dernier_hivernage": last_hiv_by.get(cid) or None,
+            "type_entretien": c.get("type_entretien") or "",
+            "prochain_passage": c.get("prochain_passage"),
+        })
+
+    rows.sort(key=lambda x: (x["nom"] or "").lower())
+    hivernees = sum(1 for x in rows if x["piscine_hivernee"])
+    avec_impayes = sum(1 for x in rows if x["a_impaye"])
+    return {
+        "total_clients": len(rows),
+        "piscines_hivernees": hivernees,
+        "clients_impayes": avec_impayes,
+        "factures_impayees_total": sum(unpaid_by.values()),
+        "clients": rows,
+    }
+
+
+class HivernageStatutUpdate(BaseModel):
+    piscine_hivernee: bool
+
+
+@app.patch("/api/clients/{client_id}/hivernage-statut")
+def patch_hivernage_statut(client_id: int, body: HivernageStatutUpdate):
+    """Bascule rapide du statut piscine hivernée."""
+    rows = read_csv(CLIENTS_CSV)
+    for r in rows:
+        if int(r["id"]) == client_id:
+            r["piscine_hivernee"] = bool_csv(body.piscine_hivernee)
+            write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
+            return row_client(r)
+    raise HTTPException(status_code=404, detail="Client introuvable")
 
 
 @app.get("/api/factures")

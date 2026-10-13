@@ -499,12 +499,19 @@ def init_supabase(
     _enabled = True
     _ready = True
 
-    # Nouvelles tables / bucket photos si absents
+    # Nouvelles tables / colonnes / bucket si absents
     try:
         get_client().table("photos_clients").select("id").limit(1).execute()
     except Exception:
         logger.info("Table photos_clients absente → ré-application schéma…")
         apply_schema()
+    try:
+        get_client().table("clients").select("piscine_hivernee").limit(1).execute()
+    except Exception:
+        logger.info("Colonne piscine_hivernee absente → ajout…")
+        _ensure_column_via_db(
+            "alter table public.clients add column if not exists piscine_hivernee text default '0';"
+        )
     ensure_photos_bucket()
 
     if csv_seed:
@@ -533,15 +540,30 @@ def _storage_sb():
     return get_admin_client() or get_client()
 
 
-def _ensure_photos_bucket_via_db() -> bool:
-    """Crée le bucket privé via Postgres (fonctionne sans service_role)."""
-    urls = _db_urls()
+def _ensure_column_via_db(sql: str, *, max_urls: int = 6) -> bool:
+    """Exécute un ALTER rapide via Postgres (évite le schéma complet)."""
+    urls = _db_urls()[:max_urls]
     if not urls:
         return False
     try:
         import psycopg
     except ImportError:
         return False
+    for url in urls:
+        try:
+            with psycopg.connect(url, connect_timeout=8) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                conn.commit()
+            logger.info("SQL OK via Postgres (%s)", url.split("@")[-1])
+            return True
+        except Exception as e:
+            logger.debug("SQL via DB échoué (%s) : %s", url.split("@")[-1], e)
+    return False
+
+
+def _ensure_photos_bucket_via_db() -> bool:
+    """Crée le bucket privé via Postgres (fonctionne sans service_role)."""
     sql = """
     insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
     values (
@@ -556,17 +578,10 @@ def _ensure_photos_bucket_via_db() -> bool:
       file_size_limit = excluded.file_size_limit,
       allowed_mime_types = excluded.allowed_mime_types;
     """
-    for url in urls:
-        try:
-            with psycopg.connect(url, connect_timeout=12) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(sql)
-                conn.commit()
-            logger.info("Bucket Storage assuré via Postgres : %s", PHOTOS_BUCKET)
-            return True
-        except Exception as e:
-            logger.debug("Bucket via DB échoué (%s) : %s", url.split("@")[-1], e)
-    return False
+    ok = _ensure_column_via_db(sql)
+    if ok:
+        logger.info("Bucket Storage assuré via Postgres : %s", PHOTOS_BUCKET)
+    return ok
 
 
 def ensure_photos_bucket() -> None:

@@ -46,6 +46,13 @@
           Client à proximité
         </button>
         <nav class="home-nav" aria-label="Autres accès">
+          <button type="button" class="home-link" id="btn-dashboard">
+            <span class="home-link-ico" aria-hidden="true">▣</span>
+            <span class="home-link-text">
+              <span class="home-link-label">Dashboard</span>
+              <span class="home-link-hint">Vue d’ensemble</span>
+            </span>
+          </button>
           <button type="button" class="home-link" id="btn-liste">
             <span class="home-link-ico" aria-hidden="true">≡</span>
             <span class="home-link-text">
@@ -128,6 +135,21 @@
         <button type="button" class="btn btn--ghost" data-goto="home">Retour</button>
         <button type="button" class="btn btn--ghost" id="btn-nouveau-depuis-none">Nouveau client</button>
       </div>
+    </section>
+
+    <section class="screen" id="screen-dashboard" data-screen>
+      <button type="button" class="back" data-goto="home">← Accueil</button>
+      <p class="eyebrow">Vue d’ensemble</p>
+      <h2 class="screen-title">Dashboard</h2>
+      <div class="dash-summary" id="dash-summary" aria-live="polite"></div>
+      <div class="filtre-row" id="dash-filtres" role="tablist" aria-label="Filtres dashboard">
+        <button type="button" class="filtre-chip is-on" data-dash-filtre="tous">Tous</button>
+        <button type="button" class="filtre-chip" data-dash-filtre="impayes">Impayés</button>
+        <button type="button" class="filtre-chip" data-dash-filtre="hivernees">Hivernées</button>
+        <button type="button" class="filtre-chip" data-dash-filtre="actives">En eau</button>
+      </div>
+      <p class="muted" id="dash-status">Chargement…</p>
+      <ul class="list list--dashboard" id="liste-dashboard"></ul>
     </section>
 
     <section class="screen" id="screen-liste" data-screen>
@@ -333,20 +355,18 @@
           </label>
         </div>
 
-        <p class="field-label">Checklist hivernage</p>
-        <p class="muted">Étapes personnalisées + photos optionnelles (JPG, PNG, WebP) — utilisées en visite Hivernage.</p>
+        <p class="field-label">Option hivernage</p>
+        <label class="toggle toggle--block">
+          <input type="checkbox" name="piscine_hivernee" id="chk-piscine-hivernee" />
+          <span>Piscine déjà hivernée</span>
+        </label>
+        <p class="muted">Ajoute tes propres étapes et photos (JPG, PNG, WebP) pour la visite Hivernage.</p>
         <div id="hivernage-editor" class="hiv-editor" aria-label="Étapes hivernage"></div>
         <div class="hiv-editor-actions">
           <button type="button" class="btn btn--ghost btn--sm" id="btn-add-hivernage-step">
             Ajouter une étape
           </button>
-          <button type="button" class="btn btn--ghost btn--sm" id="btn-reset-hivernage">
-            Checklist par défaut
-          </button>
         </div>
-        <p class="muted muted--sm" id="hivernage-photos-hint" hidden>
-          Enregistrez le client pour pouvoir joindre des photos aux étapes.
-        </p>
 
         <p class="field-label">Coordonnées client</p>
         <label class="field">

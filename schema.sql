@@ -22,7 +22,8 @@ create table if not exists public.clients (
   password_hash text default '',
   compte_actif text default '0',
   auth_uid text default '',
-  checklist_hivernage text default '[]'
+  checklist_hivernage text default '[]',
+  piscine_hivernee text default '0'
 );
 
 alter table public.clients add column if not exists identifiant text default '';
@@ -32,6 +33,7 @@ alter table public.clients add column if not exists password_hash text default '
 alter table public.clients add column if not exists compte_actif text default '0';
 alter table public.clients add column if not exists auth_uid text default '';
 alter table public.clients add column if not exists checklist_hivernage text default '[]';
+alter table public.clients add column if not exists piscine_hivernee text default '0';
 
 create unique index if not exists clients_identifiant_uidx
   on public.clients (identifiant)
