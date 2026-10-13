@@ -4,21 +4,30 @@ API AquaClient — clients piscine, géoloc, check-up, notes & fournitures.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
+import logging
 import math
 import os
 import re
+import secrets
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+import supabase_db
+
+load_dotenv(Path(__file__).parent / ".env")
+logging.basicConfig(level=logging.INFO)
 
 DATA_DIR = Path(__file__).parent / "data"
 CLIENTS_CSV = DATA_DIR / "clients.csv"
@@ -35,6 +44,7 @@ CLIENT_FIELDS = [
     "id", "nom", "prenom", "adresse", "latitude", "longitude",
     "pompe", "filtre", "robot", "skimmer", "vanne_vidange", "injecteurs", "autres",
     "type_entretien", "frequence_passage", "date_debut_passage",
+    "identifiant", "email", "telephone", "password_hash", "compte_actif", "auth_uid",
 ]
 NOTE_FIELDS = ["id", "client_id", "date", "date_ref", "texte"]
 FOURNITURE_FIELDS = [
@@ -57,6 +67,10 @@ MOIS = {
 
 
 def write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None:
+    table = supabase_db.table_for_path(path)
+    if table and supabase_db.enabled():
+        supabase_db.write_table(table, fields, rows)
+        return
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -65,6 +79,15 @@ def write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
+    table = supabase_db.table_for_path(path)
+    if table and supabase_db.enabled():
+        return supabase_db.read_table(table, {
+            "clients": CLIENT_FIELDS,
+            "notes": NOTE_FIELDS,
+            "fournitures": FOURNITURE_FIELDS,
+            "analyses": ANALYSE_FIELDS,
+            "visites": VISITE_FIELDS,
+        }.get(table))
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as f:
@@ -87,7 +110,14 @@ def _migrate_clients_columns() -> None:
         rows = list(reader)
     if fieldnames == CLIENT_FIELDS:
         return
-    normalized = [{k: r.get(k, "") for k in CLIENT_FIELDS} for r in rows]
+    normalized = []
+    for r in rows:
+        row = {k: r.get(k, "") for k in CLIENT_FIELDS}
+        if not (row.get("identifiant") or "").strip():
+            row["identifiant"] = "AC-" + secrets.token_hex(3).upper()
+        if not (row.get("compte_actif") or "").strip():
+            row["compte_actif"] = "1" if (row.get("password_hash") or "").strip() else "0"
+        normalized.append(row)
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, normalized)
 
 
@@ -189,6 +219,20 @@ _migrate_hist_date_ref()
 _migrate_factures_statut()
 _migrate_visites_columns()
 
+# Supabase : crée les tables si besoin, puis bascule lecture/écriture
+_csv_read_local = lambda path: (  # noqa: E731
+    list(csv.DictReader(path.open(newline="", encoding="utf-8"))) if path.exists() else []
+)
+supabase_db.init_supabase(
+    csv_seed={
+        "clients": (CLIENTS_CSV, CLIENT_FIELDS, _csv_read_local),
+        "notes": (NOTES_CSV, NOTE_FIELDS, _csv_read_local),
+        "analyses": (ANALYSES_CSV, ANALYSE_FIELDS, _csv_read_local),
+        "fournitures": (FOURNITURES_CSV, FOURNITURE_FIELDS, _csv_read_local),
+        "visites": (VISITES_CSV, VISITE_FIELDS, _csv_read_local),
+    }
+)
+
 app = FastAPI(title="AquaClient")
 app.add_middleware(
     CORSMiddleware,
@@ -216,6 +260,11 @@ class NouveauClient(BaseModel):
     type_entretien: str = "entretien_simple"  # entretien_simple | entretien_complet
     frequence_passage: str = ""  # hebdomadaire | bihebdomadaire | ""
     date_debut_passage: str = ""  # YYYY-MM-DD
+    # Compte client (accès futur portail)
+    creer_compte: bool = False
+    email: str = ""
+    telephone: str = ""
+    password: str = ""  # clair à l'enregistrement ; stocké hashé
 
 
 class ModifierClient(BaseModel):
@@ -234,6 +283,10 @@ class ModifierClient(BaseModel):
     type_entretien: str = "entretien_simple"
     frequence_passage: str = ""
     date_debut_passage: str = ""
+    creer_compte: bool = False
+    email: str = ""
+    telephone: str = ""
+    password: str = ""  # si non vide → nouveau mot de passe
 
 class Position(BaseModel):
     latitude: float
@@ -468,6 +521,83 @@ def from_bool_csv(v: str) -> bool:
     return str(v or "").strip().lower() in {"1", "true", "oui", "yes"}
 
 
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000
+    ).hex()
+    return f"pbkdf2_sha256$120000${salt}${digest}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        algo, rounds_s, salt, digest = (stored or "").split("$", 3)
+        if algo != "pbkdf2_sha256":
+            return False
+        check = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(rounds_s),
+        ).hex()
+        return secrets.compare_digest(check, digest)
+    except (ValueError, TypeError):
+        return False
+
+
+def generer_mot_de_passe(length: int = 10) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def generer_identifiant(rows: list[dict[str, str]]) -> str:
+    existants = {(r.get("identifiant") or "").strip().upper() for r in rows}
+    for _ in range(40):
+        code = "AC-" + "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(6))
+        if code not in existants:
+            return code
+    return f"AC-{secrets.token_hex(4).upper()}"
+
+
+def normaliser_email(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def normaliser_telephone(value: str | None) -> str:
+    raw = (value or "").strip()
+    digits = re.sub(r"[^\d+]", "", raw)
+    return digits
+
+
+def valider_coords_compte(creer_compte: bool, email: str, telephone: str) -> tuple[str, str]:
+    mail = normaliser_email(email)
+    tel = normaliser_telephone(telephone)
+    if mail and ("@" not in mail or "." not in mail.split("@")[-1]):
+        raise HTTPException(status_code=400, detail="Adresse e-mail invalide.")
+    if creer_compte and not mail and not tel:
+        raise HTTPException(
+            status_code=400,
+            detail="Création de compte : indiquez un e-mail ou un numéro de téléphone.",
+        )
+    return mail, tel
+
+
+def ensure_unique_login(
+    rows: list[dict[str, str]],
+    email: str,
+    telephone: str,
+    *,
+    exclude_id: int | None = None,
+) -> None:
+    for r in rows:
+        if exclude_id is not None and int(r.get("id") or 0) == exclude_id:
+            continue
+        if email and normaliser_email(r.get("email")) == email:
+            raise HTTPException(status_code=400, detail="Cet e-mail est déjà utilisé.")
+        if telephone and normaliser_telephone(r.get("telephone")) == telephone:
+            raise HTTPException(status_code=400, detail="Ce numéro est déjà utilisé.")
+
+
 def normalize_type_entretien(value: str | None) -> str:
     v = (value or "").strip().lower()
     if v in {"entretien_complet", "complet"}:
@@ -531,7 +661,7 @@ def prochaines_dates_passage(
     return out
 
 
-def row_client(r: dict[str, str]) -> dict[str, Any]:
+def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[str, Any]:
     freq = normalize_frequence(r.get("frequence_passage"))
     debut = (r.get("date_debut_passage") or "").strip()[:10]
     type_ent = normalize_type_entretien(r.get("type_entretien"))
@@ -540,7 +670,7 @@ def row_client(r: dict[str, str]) -> dict[str, Any]:
         freq = ""
         debut = ""
     prochaines = prochaines_dates_passage(debut, freq) if freq and debut else []
-    return {
+    out: dict[str, Any] = {
         "id": int(r["id"]),
         "nom": r.get("nom", ""),
         "prenom": r.get("prenom", ""),
@@ -559,7 +689,18 @@ def row_client(r: dict[str, str]) -> dict[str, Any]:
         "date_debut_passage": debut,
         "prochain_passage": prochaines[0] if prochaines else None,
         "prochains_passages": prochaines,
+        "identifiant": (r.get("identifiant") or "").strip(),
+        "email": (r.get("email") or "").strip(),
+        "telephone": (r.get("telephone") or "").strip(),
+        "compte_actif": from_bool_csv(r.get("compte_actif", "")),
+        "auth_uid": (r.get("auth_uid") or "").strip(),
+        "has_password": bool(
+            (r.get("password_hash") or "").strip() or (r.get("auth_uid") or "").strip()
+        ),
     }
+    if password_clair:
+        out["password_clair"] = password_clair
+    return out
 
 
 async def geocode_ban(adresse: str) -> tuple[float, float]:
@@ -1346,8 +1487,38 @@ async def create_client(body: NouveauClient):
         if len(body.adresse.strip()) < 5:
             raise HTTPException(status_code=400, detail="Adresse ou GPS requis.")
         lat, lon = await geocode_ban(body.adresse)
+
+    email, telephone = valider_coords_compte(body.creer_compte, body.email, body.telephone)
     rows = read_csv(CLIENTS_CSV)
+    ensure_unique_login(rows, email, telephone)
+
+    password_clair = None
+    password_hash = ""
+    compte_actif = "0"
+    auth_uid = ""
+    identifiant = generer_identifiant(rows)
     new_id = next_id(rows)
+
+    if body.creer_compte:
+        password_clair = (body.password or "").strip() or generer_mot_de_passe()
+        if len(password_clair) < 6:
+            raise HTTPException(status_code=400, detail="Mot de passe : 6 caractères minimum.")
+        try:
+            auth_uid = supabase_db.create_auth_user(
+                email=email,
+                telephone=telephone,
+                password=password_clair,
+                identifiant=identifiant,
+                prenom=body.prenom.strip(),
+                nom=body.nom.strip(),
+                client_id=new_id,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        compte_actif = "1"
+        # Mot de passe géré par Supabase Auth — pas de hash local
+        password_hash = ""
+
     row = {
         "id": new_id,
         "nom": body.nom.strip(),
@@ -1369,10 +1540,16 @@ async def create_client(body: NouveauClient):
         "date_debut_passage": (body.date_debut_passage or "").strip()[:10]
         if normalize_type_entretien(body.type_entretien) == "entretien_complet"
         else "",
+        "identifiant": identifiant,
+        "email": email,
+        "telephone": telephone,
+        "password_hash": password_hash,
+        "compte_actif": compte_actif,
+        "auth_uid": auth_uid,
     }
     rows.append(row)
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
-    return row_client(row)
+    return row_client(row, password_clair=password_clair)
 
 
 @app.put("/api/clients/{client_id}")
@@ -1397,6 +1574,68 @@ async def update_client(client_id: int, body: ModifierClient):
         except (TypeError, ValueError, KeyError):
             lat, lon = await geocode_ban(body.adresse)
 
+    email, telephone = valider_coords_compte(body.creer_compte, body.email, body.telephone)
+    ensure_unique_login(rows, email, telephone, exclude_id=client_id)
+
+    password_clair = None
+    password_hash = (target.get("password_hash") or "").strip()
+    auth_uid = (target.get("auth_uid") or "").strip()
+    compte_actif = "1" if body.creer_compte else "0"
+
+    if not (target.get("identifiant") or "").strip():
+        target["identifiant"] = generer_identifiant(rows)
+    identifiant = target["identifiant"]
+
+    if body.creer_compte:
+        pwd = (body.password or "").strip()
+        if pwd and len(pwd) < 6:
+            raise HTTPException(status_code=400, detail="Mot de passe : 6 caractères minimum.")
+        try:
+            if auth_uid:
+                supabase_db.update_auth_user(
+                    auth_uid,
+                    email=email,
+                    telephone=telephone,
+                    password=pwd or None,
+                    identifiant=identifiant,
+                    prenom=body.prenom.strip(),
+                    nom=body.nom.strip(),
+                    client_id=client_id,
+                    disable=False,
+                )
+                if pwd:
+                    password_clair = pwd
+                    password_hash = ""
+            else:
+                password_clair = pwd or generer_mot_de_passe()
+                auth_uid = supabase_db.create_auth_user(
+                    email=email,
+                    telephone=telephone,
+                    password=password_clair,
+                    identifiant=identifiant,
+                    prenom=body.prenom.strip(),
+                    nom=body.nom.strip(),
+                    client_id=client_id,
+                )
+                password_hash = ""
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    elif auth_uid:
+        # Compte désactivé côté fiche : ban Auth (réversible)
+        try:
+            supabase_db.update_auth_user(
+                auth_uid,
+                email=email or (target.get("email") or ""),
+                telephone=telephone or (target.get("telephone") or ""),
+                identifiant=identifiant,
+                prenom=body.prenom.strip(),
+                nom=body.nom.strip(),
+                client_id=client_id,
+                disable=True,
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
     target.update({
         "nom": body.nom.strip(),
         "prenom": body.prenom.strip(),
@@ -1417,9 +1656,14 @@ async def update_client(client_id: int, body: ModifierClient):
         "date_debut_passage": (body.date_debut_passage or "").strip()[:10]
         if normalize_type_entretien(body.type_entretien) == "entretien_complet"
         else "",
+        "email": email,
+        "telephone": telephone,
+        "password_hash": password_hash,
+        "compte_actif": compte_actif,
+        "auth_uid": auth_uid,
     })
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
-    return row_client(target)
+    return row_client(target, password_clair=password_clair)
 
 
 def _purge_client_data(client_ids: set[int]) -> None:
@@ -1437,12 +1681,26 @@ def _purge_client_data(client_ids: set[int]) -> None:
     purge(VISITES_CSV, VISITE_FIELDS)
 
 
+def _delete_auth_for_clients(rows: list[dict[str, str]], client_ids: set[int]) -> None:
+    for r in rows:
+        try:
+            cid = int(r.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cid not in client_ids:
+            continue
+        uid = (r.get("auth_uid") or "").strip()
+        if uid:
+            supabase_db.delete_auth_user(uid)
+
+
 @app.delete("/api/clients/{client_id}")
 def delete_client(client_id: int):
     rows = read_csv(CLIENTS_CSV)
     kept = [r for r in rows if int(r["id"]) != client_id]
     if len(kept) == len(rows):
         raise HTTPException(status_code=404, detail="Client introuvable")
+    _delete_auth_for_clients(rows, {client_id})
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, kept)
     _purge_client_data({client_id})
     return {"ok": True, "id": client_id}
@@ -1467,6 +1725,7 @@ def delete_clients_bulk(body: ClientsSuppression):
     deleted = len(rows) - len(kept)
     if deleted == 0:
         raise HTTPException(status_code=404, detail="Aucun client trouvé")
+    _delete_auth_for_clients(rows, ids)
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, kept)
     _purge_client_data(ids)
     return {"ok": True, "supprimes": deleted}
@@ -1961,7 +2220,46 @@ async def transcribe(audio: UploadFile = File(...)):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    return {
+        "ok": True,
+        "storage": "supabase" if supabase_db.enabled() else "csv",
+        "supabase_configured": supabase_db.configured(),
+        "supabase_auth_admin": supabase_db.has_service_role(),
+    }
+
+
+@app.post("/api/admin/init-supabase")
+def admin_init_supabase():
+    """Recrée / vérifie les tables Supabase (nécessite SUPABASE_DB_PASSWORD)."""
+    if not supabase_db.configured():
+        raise HTTPException(status_code=400, detail="SUPABASE_URL / SUPABASE_KEY manquants dans .env")
+    ok_schema = True
+    if not supabase_db.tables_exist():
+        ok_schema = supabase_db.apply_schema()
+        if not ok_schema:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Impossible de créer les tables. "
+                    "Ajoute SUPABASE_DB_PASSWORD dans .env "
+                    "(Supabase → Settings → Database → Database password) "
+                    "ou colle le contenu de schema.sql dans le SQL Editor."
+                ),
+            )
+    ready = supabase_db.init_supabase(
+        csv_seed={
+            "clients": (CLIENTS_CSV, CLIENT_FIELDS, _csv_read_local),
+            "notes": (NOTES_CSV, NOTE_FIELDS, _csv_read_local),
+            "analyses": (ANALYSES_CSV, ANALYSE_FIELDS, _csv_read_local),
+            "fournitures": (FOURNITURES_CSV, FOURNITURE_FIELDS, _csv_read_local),
+            "visites": (VISITES_CSV, VISITE_FIELDS, _csv_read_local),
+        }
+    )
+    return {
+        "ok": ready,
+        "storage": "supabase" if ready else "csv",
+        "schema_applied": ok_schema,
+    }
 
 
 if STATIC_DIR.exists():

@@ -110,7 +110,54 @@
       r.checked = false;
     });
     $("#input-date-passage").value = "";
+    $("#chk-creer-compte").checked = false;
+    $("#input-email").value = "";
+    $("#input-telephone").value = "";
+    $("#input-password").value = "";
+    $("#input-password").placeholder = "Auto si vide";
+    $("#label-password").textContent = "Mot de passe";
+    $("#compte-identifiant-line").hidden = true;
+    $("#compte-credentials").hidden = true;
+    delete $("#btn-submit-nouveau")?.dataset?.continueVisit;
     syncBlocPassage();
+    syncBlocCompte();
+  }
+
+  function syncBlocCompte() {
+    const on = !!$("#chk-creer-compte")?.checked;
+    const bloc = $("#bloc-compte");
+    if (bloc) bloc.hidden = !on;
+    const email = $("#input-email");
+    const tel = $("#input-telephone");
+    if (email) email.required = false;
+    if (tel) tel.required = false;
+  }
+
+  function genererPasswordLocal(len = 10) {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let out = "";
+    const arr = new Uint32Array(len);
+    crypto.getRandomValues(arr);
+    for (let i = 0; i < len; i++) out += chars[arr[i] % chars.length];
+    return out;
+  }
+
+  function afficherCredentials(client) {
+    const box = $("#compte-credentials");
+    if (!box) return;
+    if (!client?.password_clair && !client?.compte_actif) {
+      box.hidden = true;
+      return;
+    }
+    if (!client?.password_clair) {
+      box.hidden = true;
+      return;
+    }
+    $("#cred-identifiant").textContent = client.identifiant || "—";
+    $("#cred-login").textContent =
+      [client.email, client.telephone].filter(Boolean).join(" · ") || "—";
+    $("#cred-password").textContent = client.password_clair;
+    box.hidden = false;
   }
 
   function formatDateFr(iso) {
@@ -194,7 +241,25 @@
       r.checked = r.value === (client.frequence_passage || "");
     });
     $("#input-date-passage").value = (client.date_debut_passage || "").slice(0, 10);
+    $("#input-email").value = client.email || "";
+    $("#input-telephone").value = client.telephone || "";
+    $("#chk-creer-compte").checked = !!client.compte_actif;
+    $("#input-password").value = "";
+    $("#input-password").placeholder = client.has_password
+      ? "Laisser vide pour conserver"
+      : "Auto si vide";
+    $("#label-password").textContent = client.has_password
+      ? "Nouveau mot de passe (optionnel)"
+      : "Mot de passe";
+    if (client.identifiant) {
+      $("#compte-identifiant").textContent = client.identifiant;
+      $("#compte-identifiant-line").hidden = false;
+    } else {
+      $("#compte-identifiant-line").hidden = true;
+    }
+    $("#compte-credentials").hidden = true;
     syncBlocPassage();
+    syncBlocCompte();
   }
 
   function ouvrirEditionClient(client) {
@@ -673,6 +738,11 @@
   });
   $("#input-date-passage")?.addEventListener("change", syncBlocPassage);
   $("#input-date-passage")?.addEventListener("input", syncBlocPassage);
+  $("#chk-creer-compte")?.addEventListener("change", syncBlocCompte);
+  $("#btn-gen-password")?.addEventListener("click", () => {
+    $("#input-password").value = genererPasswordLocal();
+  });
+  syncBlocCompte();
 
   async function refreshHistorique(clientId) {
     const fiche = await api(`/api/clients/${clientId}`);
@@ -949,7 +1019,7 @@
     $("#ia-texte").value = "";
     setIntent(null);
     await refreshHistorique(c.id);
-    // Écoute auto : « fourniture 1 bidon de chlore » sans toucher un bouton
+    // Écoute mots-clés (pas d’enregistrement tant qu’on n’a pas dit note/fourniture/analyse)
     await startWakeListen();
   }
 
@@ -991,17 +1061,28 @@
     }
   });
 
-  // ── Intent + vocal (Web Speech + maintien micro) ───────────────────────────
+  // ── Intent + vocal (écoute mots-clés uniquement, pas d’enreg. en boucle) ───
 
   let wantWakeListen = false;
   let armedIntent = null;
   let speechRec = null;
   let speechRestartTimer = null;
+  let captureTimer = null;
   let holdStream = null;
   let holdRecorder = null;
   let holdChunks = [];
   let holdRecording = false;
   let processingVocal = false;
+  /** idle | wake | capture | busy */
+  let voicePhase = "idle";
+  const CAPTURE_TIMEOUT_MS = 8000;
+
+  function isMobileVocal() {
+    return (
+      /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") ||
+      (navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent || ""))
+    );
+  }
 
   function setIntent(name) {
     intentForce = name;
@@ -1025,9 +1106,6 @@
     ) {
       return "fourniture";
     }
-    if (/\b(bidon|chlore|brome|sel|sable|cartouche|floculant|algicide)\b/.test(t)) {
-      return "fourniture";
-    }
     return null;
   }
 
@@ -1037,7 +1115,6 @@
       .replace(/\s+/g, " ")
       .trim();
 
-    // Dates orales : « le 21 09 2026 » → « le 21/09/2026 »
     out = out.replace(
       /\ble\s+(\d{1,2})\s+(\d{1,2})(?:\s+(\d{2,4}))?\b/gi,
       (_, d, m, y) => {
@@ -1117,10 +1194,23 @@
       .trim();
   }
 
-  function terminerEnregistrementVocal() {
+  function clearCaptureTimer() {
+    if (captureTimer) {
+      clearTimeout(captureTimer);
+      captureTimer = null;
+    }
+  }
+
+  function backToWakeOrIdle() {
+    clearCaptureTimer();
     armedIntent = null;
     setIntent(null);
+    voicePhase = wantWakeListen ? "wake" : "idle";
     setListenStatus(wantWakeListen ? "listening" : "idle");
+  }
+
+  function terminerEnregistrementVocal() {
+    backToWakeOrIdle();
   }
 
   function updateEcouteButton() {
@@ -1131,7 +1221,7 @@
       btn.textContent = "Écoute auto · ON";
     } else {
       btn.setAttribute("aria-pressed", "false");
-      btn.textContent = "Écoute auto";
+      btn.textContent = "Écoute auto · OFF";
     }
   }
 
@@ -1141,23 +1231,30 @@
   }
 
   function setListenStatus(state) {
-    // idle / listening = silencieux ; speaking / busy = petit curseur
     const panel = $(".ia-panel");
     const dot = $(".ia-dot");
     const sub = $(".ia-sub");
     if (panel) {
-      panel.classList.remove("is-listening", "is-busy");
+      panel.classList.remove("is-listening", "is-busy", "is-capture");
       if (state === "busy") panel.classList.add("is-busy");
+      if (state === "listening") panel.classList.add("is-listening");
+      if (state === "capture" || state === "speaking") panel.classList.add("is-capture");
     }
     if (dot) {
-      dot.classList.toggle("is-listening", false);
-      dot.classList.toggle("is-busy", state === "busy");
+      dot.classList.toggle("is-listening", state === "listening");
+      dot.classList.toggle("is-busy", state === "busy" || state === "capture" || state === "speaking");
     }
-    setRecCursor(state === "speaking" || state === "busy");
+    // Curseur rouge UNIQUEMENT pendant une vraie capture (après « note… »)
+    setRecCursor(state === "capture" || state === "speaking" || state === "busy");
     if (sub) {
-      if (state === "busy") sub.textContent = "Enregistrement…";
-      else if (state === "speaking") sub.textContent = "Enregistrement";
-      else sub.textContent = "Dites « note… », « fourniture… » ou « analyse… »";
+      if (state === "busy") sub.textContent = "Traitement…";
+      else if (state === "capture" || state === "speaking") {
+        sub.textContent = "Suite… (ou dites « fin »)";
+      } else if (state === "listening") {
+        sub.textContent = "J’écoute les mots-clés : note / fourniture / analyse";
+      } else {
+        sub.textContent = "Dites « note… », « fourniture… » ou « analyse… »";
+      }
     }
   }
 
@@ -1173,41 +1270,78 @@
     return t;
   }
 
-  async function traiterTexteVocal(texteBrut) {
+  function enterCapture(intent) {
+    clearCaptureTimer();
+    armedIntent = intent;
+    setIntent(intent);
+    voicePhase = "capture";
+    setListenStatus("capture");
+    setFeedback(
+      $("#ia-feedback"),
+      `Mot-clé « ${intent} » — dictez la suite, puis silence ou « fin ».`,
+      null
+    );
+    captureTimer = setTimeout(() => {
+      if (voicePhase === "capture") {
+        setFeedback($("#ia-feedback"), "Temps écoulé — redis « note / fourniture / analyse ».", false);
+        backToWakeOrIdle();
+        scheduleSpeechRestart();
+      }
+    }, CAPTURE_TIMEOUT_MS);
+  }
+
+  async function traiterTexteVocal(texteBrut, { fromHold = false } = {}) {
     const brut = String(texteBrut || "").trim();
     if (!brut || processingVocal) return;
 
     let texte = normaliserTexteVocal(brut);
 
-    // « fin » pendant l’enregistrement → stop sans rien écrire
     if (isStopCommand(texte) || isStopCommand(stripWakePrefix(texte, armedIntent || detectWakeIntent(texte)))) {
       terminerEnregistrementVocal();
+      scheduleSpeechRestart();
       return;
     }
 
     texte = stripStopSuffix(texte);
     if (!texte) {
       terminerEnregistrementVocal();
+      scheduleSpeechRestart();
       return;
     }
 
-    const intent = detectWakeIntent(texte) || armedIntent || intentForce;
+    const wake = detectWakeIntent(texte);
+    const intent = wake || armedIntent || intentForce;
 
-    // Bruit ambiant sans mot-clé → ignore en silence
+    // Écoute wake : ignorer tout ce qui n’est PAS un mot-clé (pas d’enreg.)
+    if (!fromHold && voicePhase === "wake" && !wake && !armedIntent) {
+      return;
+    }
+
     if (!intent) {
-      setListenStatus(wantWakeListen ? "listening" : "idle");
+      if (fromHold) {
+        setFeedback(
+          $("#ia-feedback"),
+          `Non compris : « ${texte} ». Commencez par note / fourniture / analyse.`,
+          false
+        );
+      }
+      backToWakeOrIdle();
+      scheduleSpeechRestart();
       return;
     }
 
-    // Juste « note » / « fourniture » / « analyse » → attendre la suite
+    // Juste le mot-clé → ouvrir une fenêtre de capture (une seule fois)
     if (isMostlyWakeWord(texte)) {
-      armedIntent = intent;
-      setIntent(intent);
-      setListenStatus("speaking");
+      enterCapture(intent);
+      scheduleSpeechRestart();
       return;
     }
 
+    // Contenu utile → une seule commande, puis retour écoute mots-clés
     processingVocal = true;
+    voicePhase = "busy";
+    clearCaptureTimer();
+    stopSpeechRec({ keepWanted: true });
     setListenStatus("busy");
     try {
       let full = texte;
@@ -1227,11 +1361,12 @@
       armedIntent = null;
     } finally {
       processingVocal = false;
-      setListenStatus(wantWakeListen ? "listening" : "idle");
+      backToWakeOrIdle();
+      scheduleSpeechRestart();
     }
   }
 
-  function stopSpeechRec() {
+  function stopSpeechRec({ keepWanted = false } = {}) {
     if (speechRestartTimer) {
       clearTimeout(speechRestartTimer);
       speechRestartTimer = null;
@@ -1241,47 +1376,76 @@
         speechRec.onresult = null;
         speechRec.onerror = null;
         speechRec.onend = null;
-        speechRec.stop();
+        if (typeof speechRec.abort === "function") speechRec.abort();
+        else speechRec.stop();
       } catch {
-        /* */
+        try {
+          speechRec.stop();
+        } catch {
+          /* */
+        }
       }
       speechRec = null;
     }
+    if (!keepWanted) {
+      /* caller gère wantWakeListen */
+    }
+  }
+
+  function scheduleSpeechRestart() {
+    if (!wantWakeListen || processingVocal || holdRecording) return;
+    if (speechRestartTimer) clearTimeout(speechRestartTimer);
+    const delay = isMobileVocal() ? 450 : 220;
+    speechRestartTimer = setTimeout(() => {
+      speechRestartTimer = null;
+      if (!wantWakeListen || processingVocal || holdRecording || speechRec) return;
+      startSpeechRec();
+    }, delay);
   }
 
   function startSpeechRec() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return false;
-    stopSpeechRec();
+    if (speechRec || processingVocal || holdRecording) return !!speechRec;
+
+    const mobile = isMobileVocal();
     const rec = new SR();
     speechRec = rec;
     rec.lang = "fr-FR";
-    rec.continuous = true;
-    rec.interimResults = true;
+    // Sur téléphone : sessions courtes (évite la boucle continue)
+    rec.continuous = !mobile;
+    rec.interimResults = false;
     rec.maxAlternatives = 1;
 
     rec.onstart = () => {
-      setListenStatus("listening");
+      if (voicePhase === "capture") setListenStatus("capture");
+      else if (wantWakeListen) {
+        voicePhase = voicePhase === "capture" ? "capture" : "wake";
+        if (voicePhase === "wake") setListenStatus("listening");
+      }
     };
-    rec.onspeechstart = () => {
-      if (armedIntent) setListenStatus("speaking");
-    };
+
     rec.onresult = (event) => {
       let finalTxt = "";
-      let interim = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const piece = event.results[i][0].transcript;
-        if (event.results[i].isFinal) finalTxt += piece;
-        else interim += piece;
+        if (event.results[i].isFinal) {
+          finalTxt += event.results[i][0].transcript;
+        }
       }
-      const live = (interim || finalTxt).trim();
-      if (live && (detectWakeIntent(live) || armedIntent)) {
-        setListenStatus("speaking");
+      const txt = finalTxt.trim();
+      if (!txt) return;
+
+      // Phase wake : uniquement si mot-clé présent
+      if (voicePhase === "wake" || voicePhase === "idle") {
+        if (!detectWakeIntent(txt) && !armedIntent) return;
+        traiterTexteVocal(txt);
+        return;
       }
-      if (finalTxt.trim()) {
-        traiterTexteVocal(finalTxt.trim());
+      if (voicePhase === "capture") {
+        traiterTexteVocal(txt);
       }
     };
+
     rec.onerror = (ev) => {
       const err = ev.error || "";
       if (err === "aborted" || err === "no-speech") return;
@@ -1289,24 +1453,25 @@
         setFeedback($("#ia-feedback"), "Micro refusé — autorisez-le dans le navigateur.", false);
         wantWakeListen = false;
         updateEcouteButton();
+        voicePhase = "idle";
         setListenStatus("idle");
+        return;
       }
+      // network / etc. : on retentera via onend
     };
+
     rec.onend = () => {
-      if (!wantWakeListen) return;
-      speechRestartTimer = setTimeout(() => {
-        if (!wantWakeListen || !speechRec) return;
-        try {
-          speechRec.start();
-        } catch {
-          /* déjà démarré */
-        }
-      }, 120);
+      speechRec = null;
+      if (!wantWakeListen || processingVocal || holdRecording) return;
+      // Redémarrer pour réécouter les mots-clés seulement (pas un nouvel « enregistrement »)
+      scheduleSpeechRestart();
     };
+
     try {
       rec.start();
       return true;
     } catch (err) {
+      speechRec = null;
       setFeedback($("#ia-feedback"), err.message || "Impossible de démarrer le micro.", false);
       return false;
     }
@@ -1315,7 +1480,9 @@
   function stopWakeListen() {
     wantWakeListen = false;
     armedIntent = null;
+    clearCaptureTimer();
     stopSpeechRec();
+    voicePhase = "idle";
     updateEcouteButton();
     setListenStatus("idle");
   }
@@ -1323,12 +1490,17 @@
   async function startWakeListen() {
     wantWakeListen = true;
     armedIntent = null;
+    clearCaptureTimer();
+    voicePhase = "wake";
     updateEcouteButton();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
       stream.getTracks().forEach((t) => t.stop());
     } catch {
       wantWakeListen = false;
+      voicePhase = "idle";
       updateEcouteButton();
       setFeedback($("#ia-feedback"), "Micro refusé dans le navigateur.", false);
       setListenStatus("idle");
@@ -1336,22 +1508,29 @@
     }
     const ok = startSpeechRec();
     if (!ok) {
+      // Pas de Web Speech (souvent iPhone Safari) → proposer maintien
       setListenStatus("idle");
       setFeedback(
         $("#ia-feedback"),
-        "Écoute vocale indisponible (utilisez Chrome ou Edge).",
+        isMobileVocal()
+          ? "Sur ce téléphone, utilisez « Maintenir pour parler »."
+          : "Écoute auto indisponible — utilisez Chrome/Edge ou « Maintenir pour parler ».",
         false
+      );
+    } else {
+      setListenStatus("listening");
+      setFeedback(
+        $("#ia-feedback"),
+        "Écoute des mots-clés seule — rien n’est enregistré tant que vous ne dites pas note / fourniture / analyse.",
+        true
       );
     }
   }
 
   function pickRecorderMime() {
-    const candidates = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/mp4",
-      "audio/ogg",
-    ];
+    const candidates = isMobileVocal()
+      ? ["audio/mp4", "audio/aac", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"]
+      : ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];
     for (const t of candidates) {
       if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
     }
@@ -1360,6 +1539,8 @@
 
   async function startHoldRecord() {
     if (holdRecording || processingVocal) return;
+    // Couper l’écoute auto pendant le maintien (évite la double capture / boucle)
+    stopSpeechRec({ keepWanted: true });
     try {
       holdStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
@@ -1372,9 +1553,10 @@
       holdRecorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) holdChunks.push(e.data);
       };
-      holdRecorder.start(200);
+      holdRecorder.start(250);
       holdRecording = true;
-      setListenStatus("speaking");
+      voicePhase = "capture";
+      setListenStatus("capture");
       setFeedback($("#ia-feedback"), "Parlez… relâchez pour envoyer.", null);
       const btn = $("#btn-parler");
       if (btn) {
@@ -1383,6 +1565,7 @@
       }
     } catch (err) {
       setFeedback($("#ia-feedback"), err.message || "Micro indisponible.", false);
+      scheduleSpeechRestart();
     }
   }
 
@@ -1415,37 +1598,39 @@
     holdChunks = [];
 
     if (!blob || blob.size < 800) {
-      setFeedback($("#ia-feedback"), "Enregistrement trop court — maintenez plus longtemps.", false);
-      setListenStatus(wantWakeListen ? "listening" : "idle");
+      setFeedback($("#ia-feedback"), "Trop court — maintenez plus longtemps.", false);
+      backToWakeOrIdle();
+      scheduleSpeechRestart();
       return;
     }
     try {
       const fd = new FormData();
-      const ext = (blob.type || "").includes("mp4") ? "mp4" : "webm";
+      const type = blob.type || "";
+      const ext = type.includes("mp4") || type.includes("aac") ? "mp4" : type.includes("ogg") ? "ogg" : "webm";
       fd.append("audio", blob, `note.${ext}`);
       const res = await fetch("/api/transcribe", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "Transcription échouée");
-      await traiterTexteVocal(data.texte || "");
+      await traiterTexteVocal(data.texte || "", { fromHold: true });
     } catch (err) {
       setFeedback($("#ia-feedback"), err.message || "Erreur vocal.", false);
-      setListenStatus(wantWakeListen ? "listening" : "idle");
+      backToWakeOrIdle();
+      scheduleSpeechRestart();
     }
   }
 
   async function demarrerEnregistrementPour(intent) {
-    armedIntent = intent;
-    setIntent(intent);
+    enterCapture(intent);
     if (!wantWakeListen) await startWakeListen();
-    setFeedback($("#ia-feedback"), `Mode ${intent} — parlez ou maintenez le micro.`, true);
+    else if (!speechRec) startSpeechRec();
   }
 
   $$(".chip").forEach((chip) => {
     chip.addEventListener("click", async () => {
       const name = chip.dataset.intent;
-      if (intentForce === name && !holdRecording) {
-        setIntent(null);
-        armedIntent = null;
+      if (intentForce === name && voicePhase === "capture" && !holdRecording) {
+        backToWakeOrIdle();
+        scheduleSpeechRestart();
         return;
       }
       await demarrerEnregistrementPour(name);
@@ -1527,18 +1712,28 @@
   if (btnParler) {
     const down = (e) => {
       e.preventDefault();
+      try {
+        btnParler.setPointerCapture(e.pointerId);
+      } catch {
+        /* */
+      }
       startHoldRecord();
     };
     const up = (e) => {
       e.preventDefault();
+      try {
+        if (btnParler.hasPointerCapture?.(e.pointerId)) {
+          btnParler.releasePointerCapture(e.pointerId);
+        }
+      } catch {
+        /* */
+      }
       stopHoldRecord();
     };
     btnParler.addEventListener("pointerdown", down);
     btnParler.addEventListener("pointerup", up);
     btnParler.addEventListener("pointercancel", up);
-    btnParler.addEventListener("pointerleave", () => {
-      if (holdRecording) stopHoldRecord();
-    });
+    // Ne pas couper sur pointerleave (téléphone : le doigt bouge un peu)
   }
 
   $("#btn-recaler-gps").addEventListener("click", async () => {
@@ -1661,6 +1856,11 @@
     hideSuggestions();
     const form = e.target;
     const btn = $("#btn-submit-nouveau");
+    if (btn?.dataset.continueVisit === "1" && clientActif) {
+      delete btn.dataset.continueVisit;
+      allerChezClient(clientActif);
+      return;
+    }
     const editId = $("#edit-client-id").value.trim();
     const latVal = $("#input-lat").value.trim();
     const lonVal = $("#input-lon").value.trim();
@@ -1685,6 +1885,10 @@
         typeEntretien === "entretien_complet"
           ? ($("#input-date-passage")?.value || "").trim()
           : "",
+      creer_compte: !!$("#chk-creer-compte")?.checked,
+      email: ($("#input-email")?.value || "").trim(),
+      telephone: ($("#input-telephone")?.value || "").trim(),
+      password: ($("#input-password")?.value || "").trim(),
     };
     if (
       typeEntretien === "entretien_complet" &&
@@ -1700,6 +1904,14 @@
       !payload.frequence_passage
     ) {
       setFeedback($("#nouveau-feedback"), "Choisissez la fréquence de passage.", false);
+      return;
+    }
+    if (payload.creer_compte && !payload.email && !payload.telephone) {
+      setFeedback(
+        $("#nouveau-feedback"),
+        "Compte client : indiquez un e-mail ou un téléphone.",
+        false
+      );
       return;
     }
     if (latVal && lonVal) {
@@ -1728,8 +1940,19 @@
       );
       clientActif = client;
       if (editId) {
-        show("liste");
-        chargerListe();
+        remplirFormClient(client);
+        afficherCredentials(client);
+        if (!client.password_clair) {
+          show("liste");
+          chargerListe();
+        }
+      } else if (client.password_clair) {
+        btn.dataset.continueVisit = "1";
+        btn.textContent = "Continuer la visite";
+        $("#edit-client-id").value = String(client.id);
+        $("#nouveau-title").textContent = "Compte créé";
+        remplirFormClient(client);
+        afficherCredentials(client);
       } else {
         form.reset();
         gpsOverride = null;
