@@ -29,8 +29,8 @@ import supabase_db
 load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
-# Incrémenter à chaque déploiement visible (PC + téléphone doivent afficher la même)
-APP_VERSION = "1.3.0"
+# Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
+APP_VERSION = "1.3.1"
 
 DATA_DIR = Path(__file__).parent / "data"
 CLIENTS_CSV = DATA_DIR / "clients.csv"
@@ -2228,6 +2228,12 @@ async def transcribe(audio: UploadFile = File(...)):
 @app.get("/api/health")
 def health():
     storage = "supabase" if supabase_db.enabled() else "csv"
+    reason = None
+    if storage == "csv":
+        if not supabase_db.configured():
+            reason = "missing_env"
+        else:
+            reason = "init_failed"
     clients_n = 0
     try:
         clients_n = len(read_csv(CLIENTS_CSV))
@@ -2237,6 +2243,7 @@ def health():
         "ok": True,
         "version": APP_VERSION,
         "storage": storage,
+        "storage_reason": reason,
         "clients": clients_n,
         "supabase_configured": supabase_db.configured(),
         "supabase_auth_admin": supabase_db.has_service_role(),

@@ -440,8 +440,22 @@ def init_supabase(
     _enabled = False
     _ready = False
 
+    url = (os.getenv("SUPABASE_URL") or "").strip()
+    has_key = bool(_api_key())
+    logger.info(
+        "Supabase env : URL=%s KEY=%s SECRET=%s DB_PASS/DATABASE_URL=%s",
+        "oui" if url else "non",
+        "oui" if has_key else "non",
+        "oui" if _secret_key() else "non",
+        "oui" if (os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_PASSWORD")) else "non",
+    )
+
     if not configured():
-        logger.info("Supabase non configuré → stockage CSV local")
+        logger.warning(
+            "Supabase non configuré → CSV local. "
+            "Sur Render : Environment → ajoute SUPABASE_URL et SUPABASE_KEY "
+            "(le fichier .env local n’est pas déployé)."
+        )
         return False
 
     try:
@@ -454,33 +468,27 @@ def init_supabase(
         logger.info("Tables absentes → création du schéma…")
         if not apply_schema():
             logger.error(
-                "Tables Supabase introuvables. "
-                "Renseigne SUPABASE_DB_PASSWORD dans .env "
+                "Tables Supabase introuvables et schéma non appliqué. "
+                "Ajoute SUPABASE_DB_PASSWORD ou DATABASE_URL sur Render, "
                 "ou exécute schema.sql dans le SQL Editor Supabase."
             )
             return False
-        # Petit délai / re-check (cache PostgREST)
         if not tables_exist():
-            # Force un reload du schéma côté API parfois nécessaire
             logger.warning(
                 "Tables créées mais pas encore visibles via l'API. "
-                "Attends quelques secondes ou recharge le schéma API "
-                "dans Supabase (Settings → API)."
+                "On active quand même le mode Supabase."
             )
-            # On tente quand même
-            pass
 
     _enabled = True
     _ready = True
 
     if csv_seed:
         try:
-            # Seed dans l'ordre (clients d'abord pour les FK)
             order = ["clients", "notes", "analyses", "fournitures", "visites"]
             ordered = {k: csv_seed[k] for k in order if k in csv_seed}
             seed_from_csv_if_empty(ordered)
         except Exception as e:
             logger.warning("Seed CSV → Supabase : %s", e)
 
-    logger.info("Stockage actif : Supabase (%s)", (os.getenv("SUPABASE_URL") or "").strip())
+    logger.info("Stockage actif : Supabase (%s)", url)
     return True

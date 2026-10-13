@@ -80,7 +80,15 @@
       const h = await api("/api/health");
       if (verEl) verEl.textContent = `v${h.version || "?"}`;
       if (storEl) {
-        storEl.textContent = h.storage === "supabase" ? "Supabase" : "CSV local";
+        if (h.storage === "supabase") {
+          storEl.textContent = "Supabase";
+        } else if (h.storage_reason === "missing_env") {
+          storEl.textContent = "CSV (env Render manquantes)";
+        } else if (h.storage_reason === "init_failed") {
+          storEl.textContent = "CSV (init Supabase échouée)";
+        } else {
+          storEl.textContent = "CSV local";
+        }
         storEl.classList.toggle("is-cloud", h.storage === "supabase");
         storEl.classList.toggle("is-local", h.storage !== "supabase");
       }
