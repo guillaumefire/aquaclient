@@ -346,11 +346,28 @@ def apply_schema() -> bool:
         try:
             with psycopg.connect(url, connect_timeout=12) as conn:
                 with conn.cursor() as cur:
+                    ok_core = False
                     for stmt in statements:
-                        cur.execute(stmt)
-                conn.commit()
-            logger.info("Schéma Supabase appliqué (%s)", url.split("@")[-1])
-            return True
+                        try:
+                            cur.execute(stmt)
+                            conn.commit()
+                            if "create table" in stmt.lower() and "clients" in stmt.lower():
+                                ok_core = True
+                        except Exception as stmt_err:
+                            conn.rollback()
+                            # Storage / policies optionnelles : on continue
+                            msg = str(stmt_err).lower()
+                            if "storage" in stmt.lower() or "storage" in msg:
+                                logger.warning("Schéma Storage (ignoré) : %s", stmt_err)
+                                continue
+                            if "already exists" in msg or "duplicate" in msg:
+                                continue
+                            logger.warning("Statement schéma : %s — %s", stmt[:90], stmt_err)
+                    if not ok_core:
+                        # Au moins les tables métier doivent passer
+                        cur.execute("select 1 from public.clients limit 1")
+                logger.info("Schéma Supabase appliqué (%s)", url.split("@")[-1])
+                return True
         except Exception as e:
             last_err = e
             logger.debug("Connexion Postgres échouée (%s) : %s", url.split("@")[-1], e)
@@ -482,6 +499,14 @@ def init_supabase(
     _enabled = True
     _ready = True
 
+    # Nouvelles tables / bucket photos si absents
+    try:
+        get_client().table("photos_clients").select("id").limit(1).execute()
+    except Exception:
+        logger.info("Table photos_clients absente → ré-application schéma…")
+        apply_schema()
+    ensure_photos_bucket()
+
     if csv_seed:
         try:
             order = ["clients", "notes", "analyses", "fournitures", "visites"]
@@ -492,3 +517,162 @@ def init_supabase(
 
     logger.info("Stockage actif : Supabase (%s)", url)
     return True
+
+
+# --- Photos clients (Storage + métadonnées) ---
+
+PHOTOS_BUCKET = "photos-clients"
+PHOTOS_FIELDS = [
+    "id", "client_id", "instruction_id", "storage_path",
+    "mime_type", "size_bytes", "width", "height", "created_at",
+]
+
+
+def _storage_sb():
+    """Préfère la clé secrète pour le bucket privé."""
+    return get_admin_client() or get_client()
+
+
+def _ensure_photos_bucket_via_db() -> bool:
+    """Crée le bucket privé via Postgres (fonctionne sans service_role)."""
+    urls = _db_urls()
+    if not urls:
+        return False
+    try:
+        import psycopg
+    except ImportError:
+        return False
+    sql = """
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values (
+      'photos-clients',
+      'photos-clients',
+      false,
+      10485760,
+      array['image/jpeg', 'image/png', 'image/webp']
+    )
+    on conflict (id) do update set
+      public = excluded.public,
+      file_size_limit = excluded.file_size_limit,
+      allowed_mime_types = excluded.allowed_mime_types;
+    """
+    for url in urls:
+        try:
+            with psycopg.connect(url, connect_timeout=12) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                conn.commit()
+            logger.info("Bucket Storage assuré via Postgres : %s", PHOTOS_BUCKET)
+            return True
+        except Exception as e:
+            logger.debug("Bucket via DB échoué (%s) : %s", url.split("@")[-1], e)
+    return False
+
+
+def ensure_photos_bucket() -> None:
+    """Assure le bucket privé (Postgres de préférence — fiable sans service_role)."""
+    if not enabled():
+        return
+    if _ensure_photos_bucket_via_db():
+        return
+    try:
+        sb = _storage_sb()
+        existing = sb.storage.list_buckets()
+        names = set()
+        for b in existing or []:
+            name = getattr(b, "name", None) or getattr(b, "id", None)
+            if isinstance(b, dict):
+                name = b.get("name") or b.get("id")
+            if name:
+                names.add(str(name))
+        if PHOTOS_BUCKET in names:
+            return
+        sb.storage.create_bucket(
+            PHOTOS_BUCKET,
+            options={
+                "public": False,
+                "file_size_limit": 10 * 1024 * 1024,
+                "allowed_mime_types": ["image/jpeg", "image/png", "image/webp"],
+            },
+        )
+        logger.info("Bucket Storage créé : %s", PHOTOS_BUCKET)
+    except Exception as e:
+        logger.warning(
+            "Bucket %s non créé (%s). Ajoute SUPABASE_SECRET_KEY ou exécute schema.sql.",
+            PHOTOS_BUCKET,
+            e,
+        )
+
+
+def list_photos(client_id: int | None = None, instruction_id: str | None = None) -> list[dict[str, Any]]:
+    sb = get_client()
+    q = sb.table("photos_clients").select("*").order("created_at")
+    if client_id is not None:
+        q = q.eq("client_id", client_id)
+    if instruction_id:
+        q = q.eq("instruction_id", instruction_id)
+    resp = q.execute()
+    return list(resp.data or [])
+
+
+def get_photo(photo_id: str) -> dict[str, Any] | None:
+    sb = get_client()
+    resp = sb.table("photos_clients").select("*").eq("id", photo_id).limit(1).execute()
+    rows = resp.data or []
+    return rows[0] if rows else None
+
+
+def insert_photo_meta(row: dict[str, Any]) -> dict[str, Any]:
+    sb = get_client()
+    resp = sb.table("photos_clients").insert(row).execute()
+    data = resp.data or []
+    return data[0] if data else row
+
+
+def delete_photo_meta(photo_id: str) -> None:
+    sb = get_client()
+    sb.table("photos_clients").delete().eq("id", photo_id).execute()
+
+
+def upload_photo_bytes(storage_path: str, data: bytes, content_type: str = "image/webp") -> None:
+    sb = _storage_sb()
+    sb.storage.from_(PHOTOS_BUCKET).upload(
+        storage_path,
+        data,
+        file_options={
+            "content-type": content_type,
+            "upsert": "false",
+        },
+    )
+
+
+def download_photo_bytes(storage_path: str) -> bytes:
+    sb = _storage_sb()
+    return sb.storage.from_(PHOTOS_BUCKET).download(storage_path)
+
+
+def remove_photo_file(storage_path: str) -> None:
+    sb = _storage_sb()
+    try:
+        sb.storage.from_(PHOTOS_BUCKET).remove([storage_path])
+    except Exception as e:
+        logger.warning("Suppression Storage %s : %s", storage_path, e)
+
+
+def delete_photos_for_clients(client_ids: set[int]) -> None:
+    if not client_ids or not enabled():
+        return
+    sb = get_client()
+    for cid in client_ids:
+        try:
+            resp = sb.table("photos_clients").select("id,storage_path").eq("client_id", cid).execute()
+            rows = resp.data or []
+            paths = [r["storage_path"] for r in rows if r.get("storage_path")]
+            if paths:
+                try:
+                    _storage_sb().storage.from_(PHOTOS_BUCKET).remove(paths)
+                except Exception as e:
+                    logger.warning("Purge Storage client %s : %s", cid, e)
+            sb.table("photos_clients").delete().eq("client_id", cid).execute()
+        except Exception as e:
+            logger.warning("Purge photos client %s : %s", cid, e)

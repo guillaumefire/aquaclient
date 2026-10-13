@@ -112,6 +112,7 @@
         <button type="button" class="btn btn--primary" data-visite="entretien_simple">Entretien classique</button>
         <button type="button" class="btn btn--ghost" data-visite="entretien_complet">Entretien complet</button>
         <button type="button" class="btn btn--ghost" data-visite="depannage">Dépannage</button>
+        <button type="button" class="btn btn--ghost" data-visite="hivernage">Hivernage</button>
       </div>
     </section>
 
@@ -180,7 +181,10 @@
     <section class="screen" id="screen-visite" data-screen>
       <div class="visite-top">
         <button type="button" class="back" data-goto="home">← Accueil</button>
-        <button type="button" class="btn btn--ghost btn--sm" id="btn-depannage-visite">Dépannage</button>
+        <div class="visite-top-actions">
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-depannage-visite">Dépannage</button>
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-hivernage-visite">Hivernage</button>
+        </div>
       </div>
       <p class="eyebrow" id="visite-type-label">Visite</p>
       <h2 class="screen-title" id="visite-name">—</h2>
@@ -329,6 +333,21 @@
           </label>
         </div>
 
+        <p class="field-label">Checklist hivernage</p>
+        <p class="muted">Étapes personnalisées + photos optionnelles (JPG, PNG, WebP) — utilisées en visite Hivernage.</p>
+        <div id="hivernage-editor" class="hiv-editor" aria-label="Étapes hivernage"></div>
+        <div class="hiv-editor-actions">
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-add-hivernage-step">
+            Ajouter une étape
+          </button>
+          <button type="button" class="btn btn--ghost btn--sm" id="btn-reset-hivernage">
+            Checklist par défaut
+          </button>
+        </div>
+        <p class="muted muted--sm" id="hivernage-photos-hint" hidden>
+          Enregistrez le client pour pouvoir joindre des photos aux étapes.
+        </p>
+
         <p class="field-label">Coordonnées client</p>
         <label class="field">
           <span>E-mail <em class="opt">(optionnel)</em></span>
@@ -385,6 +404,10 @@
     <span class="footer-sep">·</span>
     <span id="footer-clients">—</span>
   </footer>
+
+  <div id="photo-lightbox" class="photo-lightbox" hidden>
+    <img id="photo-lightbox-img" alt="Aperçu photo" />
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

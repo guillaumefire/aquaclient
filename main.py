@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import logging
 import math
@@ -12,13 +13,14 @@ import os
 import re
 import secrets
 import tempfile
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +32,13 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.5.0"
+
+PHOTOS_BUCKET = "photos-clients"
+MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
+MAX_PHOTO_EDGE = 1920
+WEBP_QUALITY = 82
+ALLOWED_PHOTO_MIMES = {"image/jpeg", "image/png", "image/webp"}
 
 DATA_DIR = Path(__file__).parent / "data"
 CLIENTS_CSV = DATA_DIR / "clients.csv"
@@ -39,15 +47,34 @@ FOURNITURES_CSV = DATA_DIR / "fournitures.csv"
 ANALYSES_CSV = DATA_DIR / "analyses.csv"
 VISITES_CSV = DATA_DIR / "visites.csv"
 FACTURES_LEGACY = DATA_DIR / "factures.csv"
+PHOTOS_META_CSV = DATA_DIR / "photos_clients.csv"
+PHOTOS_DIR = DATA_DIR / "photos"
 STATIC_DIR = Path(__file__).parent / "static"
 
 DATA_DIR.mkdir(exist_ok=True)
+PHOTOS_DIR.mkdir(exist_ok=True)
+
+PHOTOS_META_FIELDS = [
+    "id", "client_id", "instruction_id", "storage_path",
+    "mime_type", "size_bytes", "width", "height", "created_at",
+]
 
 CLIENT_FIELDS = [
     "id", "nom", "prenom", "adresse", "latitude", "longitude",
     "pompe", "filtre", "robot", "skimmer", "vanne_vidange", "injecteurs", "autres",
     "type_entretien", "frequence_passage", "date_debut_passage",
     "identifiant", "email", "telephone", "password_hash", "compte_actif", "auth_uid",
+    "checklist_hivernage",
+]
+
+DEFAULT_CHECKLIST_HIVERNAGE = [
+    "Baisse du niveau d'eau",
+    "Vidange des canalisations",
+    "Purge pompe / filtre",
+    "Produit d'hivernage",
+    "Couverture / filet d'hiver",
+    "Contrôle local technique",
+    "Note de visite",
 ]
 NOTE_FIELDS = ["id", "client_id", "date", "date_ref", "texte"]
 FOURNITURE_FIELDS = [
@@ -268,6 +295,8 @@ class NouveauClient(BaseModel):
     email: str = ""
     telephone: str = ""
     password: str = ""  # clair à l'enregistrement ; stocké hashé
+    # Checklist hivernage : libellés ou {id, label}
+    checklist_hivernage: list[Any] = Field(default_factory=list)
 
 
 class ModifierClient(BaseModel):
@@ -290,6 +319,7 @@ class ModifierClient(BaseModel):
     email: str = ""
     telephone: str = ""
     password: str = ""  # si non vide → nouveau mot de passe
+    checklist_hivernage: list[Any] = Field(default_factory=list)
 
 class Position(BaseModel):
     latitude: float
@@ -309,7 +339,7 @@ class PositionClient(BaseModel):
 
 class VisiteCreate(BaseModel):
     client_id: int
-    type: str  # depannage | entretien_simple | entretien_complet
+    type: str  # depannage | entretien_simple | entretien_complet | hivernage
 
 
 class ChecklistUpdate(BaseModel):
@@ -601,6 +631,292 @@ def ensure_unique_login(
             raise HTTPException(status_code=400, detail="Ce numéro est déjà utilisé.")
 
 
+def _new_instruction_id() -> str:
+    return str(uuid.uuid4())
+
+
+def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
+    """Retourne [{id, label}, ...] pour les étapes hivernage."""
+    items: list[Any]
+    if isinstance(raw, list):
+        items = raw
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+            items = data if isinstance(data, list) else []
+        except (json.JSONDecodeError, TypeError):
+            items = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    out: list[dict[str, str]] = []
+    for item in items:
+        if isinstance(item, dict):
+            lab = str(item.get("label") or item.get("texte") or "").strip()
+            iid = str(item.get("id") or "").strip()
+        else:
+            lab = str(item).strip()
+            iid = ""
+        if not lab:
+            continue
+        out.append({"id": iid or _new_instruction_id(), "label": lab})
+    return out
+
+
+def serialize_checklist_hivernage(items: list[Any] | None) -> str:
+    clean = parse_checklist_hivernage(items or [])
+    return json.dumps(clean, ensure_ascii=False)
+
+
+def checklist_storage_needs_ids(raw: Any) -> bool:
+    """True si la checklist stockée n'a pas encore d'ids stables."""
+    if isinstance(raw, list):
+        if not raw:
+            return False
+        return any(not (isinstance(x, dict) and str(x.get("id") or "").strip()) for x in raw)
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return True  # lignes libres → migrer
+    if not isinstance(data, list) or not data:
+        return False
+    return any(not (isinstance(x, dict) and str(x.get("id") or "").strip()) for x in data)
+
+
+def migrate_checklist_hivernage_ids() -> None:
+    """Persiste des UUID sur les étapes hivernage encore en simple liste de libellés."""
+    try:
+        rows = read_csv(CLIENTS_CSV)
+    except Exception as e:
+        logging.getLogger("aquaclient").warning("Migration checklist ids : %s", e)
+        return
+    changed = False
+    for r in rows:
+        raw = r.get("checklist_hivernage")
+        if not checklist_storage_needs_ids(raw):
+            continue
+        steps = parse_checklist_hivernage(raw) or default_checklist_hivernage_items()
+        r["checklist_hivernage"] = serialize_checklist_hivernage(steps)
+        changed = True
+    if changed:
+        write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
+        logging.getLogger("aquaclient").info(
+            "Migration checklist hivernage : ids persistés pour les clients concernés"
+        )
+
+
+def checklist_labels(items: list[Any] | None) -> list[str]:
+    return [x["label"] for x in parse_checklist_hivernage(items or [])]
+
+
+def default_checklist_hivernage_items() -> list[dict[str, str]]:
+    return [{"id": _new_instruction_id(), "label": lab} for lab in DEFAULT_CHECKLIST_HIVERNAGE]
+
+
+def slug_checklist_id(label: str, index: int) -> str:
+    base = re.sub(r"[^a-z0-9]+", "_", (label or "").lower())
+    base = base.strip("_")[:40] or "etape"
+    return f"hiv_{index}_{base}"
+
+
+def detect_image_mime(data: bytes) -> str | None:
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def optimize_photo(data: bytes) -> tuple[bytes, int, int]:
+    """Redimensionne et convertit en WebP pour limiter l'espace Storage."""
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(data))
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    elif img.mode == "L":
+        img = img.convert("RGB")
+    w, h = img.size
+    longest = max(w, h) or 1
+    if longest > MAX_PHOTO_EDGE:
+        scale = MAX_PHOTO_EDGE / longest
+        img = img.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    buf = io.BytesIO()
+    img.save(buf, format="WEBP", quality=WEBP_QUALITY, method=6)
+    ow, oh = img.size
+    return buf.getvalue(), ow, oh
+
+
+def photo_public(row: dict[str, Any]) -> dict[str, Any]:
+    pid = str(row.get("id") or "")
+    return {
+        "id": pid,
+        "client_id": int(row.get("client_id") or 0),
+        "instruction_id": str(row.get("instruction_id") or ""),
+        "mime_type": str(row.get("mime_type") or "image/webp"),
+        "size_bytes": int(float(row.get("size_bytes") or 0)),
+        "width": int(float(row["width"])) if row.get("width") not in (None, "") else None,
+        "height": int(float(row["height"])) if row.get("height") not in (None, "") else None,
+        "created_at": str(row.get("created_at") or ""),
+        "url": f"/api/photos/{pid}/file",
+    }
+
+
+def read_photos_meta() -> list[dict[str, str]]:
+    if supabase_db.enabled():
+        rows = supabase_db.list_photos()
+        out: list[dict[str, str]] = []
+        for r in rows:
+            out.append({k: "" if r.get(k) is None else str(r.get(k)) for k in PHOTOS_META_FIELDS})
+        return out
+    if not PHOTOS_META_CSV.exists():
+        return []
+    with PHOTOS_META_CSV.open("r", newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def write_photos_meta(rows: list[dict[str, Any]]) -> None:
+    with PHOTOS_META_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=PHOTOS_META_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in PHOTOS_META_FIELDS})
+
+
+def list_client_photos(client_id: int, instruction_id: str | None = None) -> list[dict[str, Any]]:
+    if supabase_db.enabled():
+        rows = supabase_db.list_photos(client_id, instruction_id)
+        return [photo_public(r) for r in rows]
+    rows = read_photos_meta()
+    out = []
+    for r in rows:
+        if int(r.get("client_id") or 0) != client_id:
+            continue
+        if instruction_id and (r.get("instruction_id") or "") != instruction_id:
+            continue
+        out.append(photo_public(r))
+    return out
+
+
+def get_photo_row(photo_id: str) -> dict[str, Any] | None:
+    if supabase_db.enabled():
+        return supabase_db.get_photo(photo_id)
+    for r in read_photos_meta():
+        if str(r.get("id")) == str(photo_id):
+            return r
+    return None
+
+
+def load_photo_bytes(row: dict[str, Any]) -> bytes:
+    path = str(row.get("storage_path") or "")
+    if supabase_db.enabled() and not path.startswith("local:"):
+        return supabase_db.download_photo_bytes(path)
+    local = Path(path[6:]) if path.startswith("local:") else PHOTOS_DIR / path
+    if not local.is_file():
+        # chemin relatif stocké tel quel
+        alt = PHOTOS_DIR / path
+        if alt.is_file():
+            return alt.read_bytes()
+        raise FileNotFoundError(path)
+    return local.read_bytes()
+
+
+def persist_photo(
+    *,
+    client_id: int,
+    instruction_id: str,
+    raw: bytes,
+) -> dict[str, Any]:
+    mime = detect_image_mime(raw)
+    if mime not in ALLOWED_PHOTO_MIMES:
+        raise HTTPException(
+            status_code=400,
+            detail="Format non supporté. Utilisez JPG, PNG ou WebP.",
+        )
+    if len(raw) > MAX_PHOTO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fichier trop volumineux (max {MAX_PHOTO_UPLOAD_BYTES // (1024 * 1024)} Mo).",
+        )
+    try:
+        optimized, width, height = optimize_photo(raw)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Image invalide : {e}") from e
+
+    photo_id = str(uuid.uuid4())
+    storage_path = f"{client_id}/{instruction_id}/{photo_id}.webp"
+    created = datetime.now().isoformat(timespec="seconds")
+
+    if supabase_db.enabled():
+        try:
+            supabase_db.upload_photo_bytes(storage_path, optimized, "image/webp")
+            meta = {
+                "id": photo_id,
+                "client_id": client_id,
+                "instruction_id": instruction_id,
+                "storage_path": storage_path,
+                "mime_type": "image/webp",
+                "size_bytes": len(optimized),
+                "width": width,
+                "height": height,
+                "created_at": created,
+            }
+            saved = supabase_db.insert_photo_meta(meta)
+            return photo_public(saved)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Upload Storage impossible : {e}",
+            ) from e
+
+    # Fallback local (mode CSV)
+    dest_dir = PHOTOS_DIR / str(client_id) / instruction_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{photo_id}.webp"
+    dest.write_bytes(optimized)
+    rel = f"{client_id}/{instruction_id}/{photo_id}.webp"
+    meta = {
+        "id": photo_id,
+        "client_id": str(client_id),
+        "instruction_id": instruction_id,
+        "storage_path": rel,
+        "mime_type": "image/webp",
+        "size_bytes": str(len(optimized)),
+        "width": str(width),
+        "height": str(height),
+        "created_at": created,
+    }
+    rows = read_photos_meta()
+    rows.append(meta)
+    write_photos_meta(rows)
+    return photo_public(meta)
+
+
+def delete_photo_row(photo_id: str) -> None:
+    row = get_photo_row(photo_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Photo introuvable")
+    path = str(row.get("storage_path") or "")
+    if supabase_db.enabled() and not path.startswith("local:"):
+        supabase_db.remove_photo_file(path)
+        supabase_db.delete_photo_meta(photo_id)
+        return
+    local = PHOTOS_DIR / path
+    if local.is_file():
+        local.unlink()
+    rows = [r for r in read_photos_meta() if str(r.get("id")) != str(photo_id)]
+    write_photos_meta(rows)
+
+
 def normalize_type_entretien(value: str | None) -> str:
     v = (value or "").strip().lower()
     if v in {"entretien_complet", "complet"}:
@@ -699,6 +1015,10 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         "auth_uid": (r.get("auth_uid") or "").strip(),
         "has_password": bool(
             (r.get("password_hash") or "").strip() or (r.get("auth_uid") or "").strip()
+        ),
+        "checklist_hivernage": (
+            parse_checklist_hivernage(r.get("checklist_hivernage"))
+            or default_checklist_hivernage_items()
         ),
     }
     if password_clair:
@@ -1378,6 +1698,27 @@ def build_checklist(client: dict[str, Any], type_visite: str) -> list[dict[str, 
         add("test_final", "Test final")
         add("fournitures", "Fournitures notées", optional=True)
         add("note_finale", "Note de visite", optional=True)
+    elif type_visite == "hivernage":
+        steps = parse_checklist_hivernage(client.get("checklist_hivernage"))
+        if not steps:
+            steps = default_checklist_hivernage_items()
+        photos_by_inst: dict[str, list[dict[str, Any]]] = {}
+        try:
+            cid = int(client.get("id") or 0)
+            for ph in list_client_photos(cid):
+                photos_by_inst.setdefault(ph["instruction_id"], []).append(ph)
+        except Exception:
+            photos_by_inst = {}
+        for idx, step in enumerate(steps, start=1):
+            iid = step.get("id") or slug_checklist_id(step["label"], idx)
+            items.append({
+                "id": iid,
+                "label": step["label"],
+                "warn": None,
+                "optional": False,
+                "done": False,
+                "photos": photos_by_inst.get(iid, []),
+            })
     elif type_visite == "entretien_simple":
         # Entretien classique : analyse + lavage/rinçage + paniers éventuels
         add("analyse", "Analyse")
@@ -1408,6 +1749,12 @@ def build_checklist(client: dict[str, Any], type_visite: str) -> list[dict[str, 
         add("note_finale", "Note de visite", optional=True)
 
     return items
+
+
+try:
+    migrate_checklist_hivernage_ids()
+except Exception as e:
+    logging.getLogger("aquaclient").warning("Migration checklist ids ignorée : %s", e)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -1551,11 +1898,15 @@ async def create_client(body: NouveauClient):
         "password_hash": password_hash,
         "compte_actif": compte_actif,
         "auth_uid": auth_uid,
+        "checklist_hivernage": serialize_checklist_hivernage(
+            body.checklist_hivernage or default_checklist_hivernage_items()
+        ),
     }
     rows.append(row)
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
     out = row_client(row, password_clair=password_clair)
     out["storage"] = "supabase" if supabase_db.enabled() else "csv"
+    out["photos"] = []
     return out
 
 
@@ -1668,9 +2019,16 @@ async def update_client(client_id: int, body: ModifierClient):
         "password_hash": password_hash,
         "compte_actif": compte_actif,
         "auth_uid": auth_uid,
+        "checklist_hivernage": serialize_checklist_hivernage(
+            body.checklist_hivernage
+            if body.checklist_hivernage is not None
+            else parse_checklist_hivernage(target.get("checklist_hivernage"))
+        ),
     })
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
-    return row_client(target, password_clair=password_clair)
+    out = row_client(target, password_clair=password_clair)
+    out["photos"] = list_client_photos(client_id)
+    return out
 
 
 def _purge_client_data(client_ids: set[int]) -> None:
@@ -1686,6 +2044,31 @@ def _purge_client_data(client_ids: set[int]) -> None:
     purge(FOURNITURES_CSV, FOURNITURE_FIELDS)
     purge(ANALYSES_CSV, ANALYSE_FIELDS)
     purge(VISITES_CSV, VISITE_FIELDS)
+    if supabase_db.enabled():
+        supabase_db.delete_photos_for_clients(client_ids)
+    else:
+        rows = [
+            r for r in read_photos_meta()
+            if int(r.get("client_id") or 0) not in client_ids
+        ]
+        write_photos_meta(rows)
+        for cid in client_ids:
+            folder = PHOTOS_DIR / str(cid)
+            if folder.is_dir():
+                for f in folder.rglob("*"):
+                    if f.is_file():
+                        f.unlink()
+                # nettoyage dossiers vides
+                for d in sorted(folder.rglob("*"), reverse=True):
+                    if d.is_dir():
+                        try:
+                            d.rmdir()
+                        except OSError:
+                            pass
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
 
 
 def _delete_auth_for_clients(rows: list[dict[str, str]], client_ids: set[int]) -> None:
@@ -1780,6 +2163,65 @@ def update_position(client_id: int, pos: PositionClient):
     raise HTTPException(status_code=404, detail="Client introuvable")
 
 
+@app.get("/api/clients/{client_id}/photos")
+def list_photos_client(client_id: int, instruction_id: str | None = None):
+    rows = read_csv(CLIENTS_CSV)
+    if not any(int(r["id"]) == client_id for r in rows):
+        raise HTTPException(status_code=404, detail="Client introuvable")
+    return {"photos": list_client_photos(client_id, instruction_id)}
+
+
+@app.post("/api/clients/{client_id}/photos")
+async def upload_photo_client(
+    client_id: int,
+    instruction_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    rows = read_csv(CLIENTS_CSV)
+    target = next((r for r in rows if int(r["id"]) == client_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Client introuvable")
+    iid = (instruction_id or "").strip()
+    if not iid:
+        raise HTTPException(status_code=400, detail="instruction_id requis")
+    steps = parse_checklist_hivernage(target.get("checklist_hivernage"))
+    known_ids = {s["id"] for s in steps}
+    if known_ids and iid not in known_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Instruction introuvable sur ce client. Enregistrez la checklist d'abord.",
+        )
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Fichier vide")
+    return persist_photo(client_id=client_id, instruction_id=iid, raw=raw)
+
+
+@app.get("/api/photos/{photo_id}/file")
+def serve_photo_file(photo_id: str):
+    row = get_photo_row(photo_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Photo introuvable")
+    try:
+        data = load_photo_bytes(row)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Fichier photo manquant") from None
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lecture photo : {e}") from e
+    mime = str(row.get("mime_type") or "image/webp")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@app.delete("/api/photos/{photo_id}")
+def delete_photo(photo_id: str):
+    delete_photo_row(photo_id)
+    return {"ok": True, "id": photo_id}
+
+
 @app.get("/api/clients/{client_id}")
 def get_client(client_id: int):
     for r in read_csv(CLIENTS_CSV):
@@ -1794,13 +2236,14 @@ def get_client(client_id: int):
                 "fournitures": fournitures,
                 "analyses": analyses,
                 "visites": visites,
+                "photos": list_client_photos(client_id),
             }
     raise HTTPException(status_code=404, detail="Client introuvable")
 
 
 @app.post("/api/visites")
 def create_visite(body: VisiteCreate):
-    if body.type not in {"depannage", "entretien_simple", "entretien_complet"}:
+    if body.type not in {"depannage", "entretien_simple", "entretien_complet", "hivernage"}:
         raise HTTPException(status_code=400, detail="Type de visite invalide")
     client = None
     for r in read_csv(CLIENTS_CSV):
@@ -1834,12 +2277,24 @@ def _visite_payload(r: dict[str, str], client: dict[str, Any] | None = None) -> 
             None,
         )
     duree = r.get("duree_minutes") or ""
+    checklist = json.loads(r.get("checklist_json") or "[]")
+    if (r.get("type") or "") == "hivernage":
+        try:
+            photos = list_client_photos(int(r["client_id"]))
+            by_inst: dict[str, list[dict[str, Any]]] = {}
+            for ph in photos:
+                by_inst.setdefault(ph["instruction_id"], []).append(ph)
+            for item in checklist:
+                if isinstance(item, dict):
+                    item["photos"] = by_inst.get(str(item.get("id") or ""), [])
+        except Exception:
+            pass
     return {
         "id": int(r["id"]),
         "client_id": int(r["client_id"]),
         "date": r.get("date", ""),
         "type": r.get("type", ""),
-        "checklist": json.loads(r.get("checklist_json") or "[]"),
+        "checklist": checklist,
         "debut": r.get("debut") or None,
         "fin": r.get("fin") or None,
         "duree_minutes": float(duree) if str(duree).strip() else None,

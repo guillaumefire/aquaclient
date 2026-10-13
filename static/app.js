@@ -30,7 +30,281 @@
     depannage: "Dépannage",
     entretien_simple: "Entretien classique",
     entretien_complet: "Entretien complet",
+    hivernage: "Hivernage",
   };
+
+  const DEFAULT_CHECKLIST_HIVERNAGE = [
+    "Baisse du niveau d'eau",
+    "Vidange des canalisations",
+    "Purge pompe / filtre",
+    "Produit d'hivernage",
+    "Couverture / filet d'hiver",
+    "Contrôle local technique",
+    "Note de visite",
+  ];
+
+  /** @type {{id:string,label:string,photos:Array}[]} */
+  let hivernageSteps = [];
+  /** @type {Record<string, Array>} photos par instruction_id (client édité) */
+  let hivernagePhotosByInst = {};
+
+  function newInstructionId() {
+    if (crypto?.randomUUID) return crypto.randomUUID();
+    return `hiv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function normalizeHivernageSteps(list) {
+    const raw = Array.isArray(list) && list.length ? list : DEFAULT_CHECKLIST_HIVERNAGE;
+    return raw
+      .map((item) => {
+        if (item && typeof item === "object") {
+          const label = String(item.label || item.texte || "").trim();
+          if (!label) return null;
+          return {
+            id: String(item.id || "").trim() || newInstructionId(),
+            label,
+            photos: Array.isArray(item.photos) ? item.photos : [],
+          };
+        }
+        const label = String(item || "").trim();
+        if (!label) return null;
+        return { id: newInstructionId(), label, photos: [] };
+      })
+      .filter(Boolean);
+  }
+
+  function collectHivernageFromEditor() {
+    const root = $("#hivernage-editor");
+    if (!root) return normalizeHivernageSteps(DEFAULT_CHECKLIST_HIVERNAGE);
+    return $$(".hiv-step", root)
+      .map((row) => {
+        const id = row.dataset.id || newInstructionId();
+        const label = ($("input[type='text']", row)?.value || "").trim();
+        if (!label) return null;
+        return { id, label };
+      })
+      .filter(Boolean);
+  }
+
+  function openPhotoLightbox(url) {
+    const box = $("#photo-lightbox");
+    const img = $("#photo-lightbox-img");
+    if (!box || !img) return;
+    img.src = url;
+    box.hidden = false;
+  }
+
+  function closePhotoLightbox() {
+    const box = $("#photo-lightbox");
+    const img = $("#photo-lightbox-img");
+    if (img) img.removeAttribute("src");
+    if (box) box.hidden = true;
+  }
+
+  function renderHivernageEditor() {
+    const root = $("#hivernage-editor");
+    if (!root) return;
+    const clientId = ($("#edit-client-id")?.value || "").trim();
+    const canPhotos = !!clientId;
+    const hint = $("#hivernage-photos-hint");
+    if (hint) hint.hidden = canPhotos;
+
+    root.innerHTML = "";
+    hivernageSteps.forEach((step) => {
+      const photos = [
+        ...(step.photos || []),
+        ...(hivernagePhotosByInst[step.id] || []),
+      ];
+      // dédoublonnage par id
+      const seen = new Set();
+      const uniq = photos.filter((p) => {
+        const pid = String(p.id || "");
+        if (!pid || seen.has(pid)) return false;
+        seen.add(pid);
+        return true;
+      });
+
+      const row = document.createElement("div");
+      row.className = "hiv-step";
+      row.dataset.id = step.id;
+      row.innerHTML =
+        `<div class="hiv-step-row">` +
+        `<input type="text" value="${escapeHtml(step.label)}" placeholder="Instruction…" />` +
+        `<button type="button" class="hiv-step-remove" data-act="remove">Retirer</button>` +
+        `</div>` +
+        `<div class="hiv-photos" data-photos></div>`;
+
+      const photosEl = $("[data-photos]", row);
+      uniq.forEach((ph) => {
+        const url = ph.url || `/api/photos/${ph.id}/file`;
+        const fig = document.createElement("div");
+        fig.className = "hiv-photo";
+        fig.innerHTML =
+          `<img src="${escapeHtml(url)}" alt="" loading="lazy" />` +
+          `<button type="button" class="hiv-photo-del" data-photo-id="${escapeHtml(ph.id)}" title="Supprimer">×</button>`;
+        $("img", fig)?.addEventListener("click", () => openPhotoLightbox(url));
+        $(".hiv-photo-del", fig)?.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          if (!window.confirm("Supprimer cette photo ?")) return;
+          try {
+            await api(`/api/photos/${ph.id}`, { method: "DELETE" });
+            hivernagePhotosByInst[step.id] = (hivernagePhotosByInst[step.id] || []).filter(
+              (x) => x.id !== ph.id
+            );
+            step.photos = (step.photos || []).filter((x) => x.id !== ph.id);
+            renderHivernageEditor();
+          } catch (err) {
+            setFeedback($("#nouveau-feedback"), err.message, false);
+          }
+        });
+        photosEl.appendChild(fig);
+      });
+
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "hiv-add-photo";
+      addBtn.textContent = canPhotos ? "＋ Photo" : "Photo après save";
+      addBtn.disabled = !canPhotos;
+      addBtn.addEventListener("click", () => pickAndUploadPhoto(step.id));
+      photosEl.appendChild(addBtn);
+
+      $(".hiv-step-remove", row)?.addEventListener("click", () => {
+        hivernageSteps = collectHivernageFromEditor().filter((s) => s.id !== step.id);
+        if (!hivernageSteps.length) {
+          hivernageSteps = normalizeHivernageSteps(DEFAULT_CHECKLIST_HIVERNAGE);
+        }
+        renderHivernageEditor();
+      });
+
+      root.appendChild(row);
+    });
+  }
+
+  async function pickAndUploadPhoto(instructionId) {
+    const clientId = ($("#edit-client-id")?.value || "").trim();
+    if (!clientId) {
+      setFeedback(
+        $("#nouveau-feedback"),
+        "Enregistrez d'abord le client pour ajouter des photos.",
+        false
+      );
+      return;
+    }
+    // Sync labels avant upload pour que l'instruction existe côté serveur
+    const steps = collectHivernageFromEditor();
+    const step = steps.find((s) => s.id === instructionId);
+    if (!step?.label) {
+      setFeedback(
+        $("#nouveau-feedback"),
+        "Renseignez le texte de l'étape avant d'ajouter une photo.",
+        false
+      );
+      return;
+    }
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      setFeedback($("#nouveau-feedback"), "Envoi de la photo…", null);
+      try {
+        // Persiste la checklist (ids) puis upload
+        await api(`/api/clients/${clientId}`, {
+          method: "PUT",
+          body: JSON.stringify(buildClientPayloadFromForm()),
+        });
+        const fd = new FormData();
+        fd.append("instruction_id", instructionId);
+        fd.append("file", file);
+        const res = await fetch(`/api/clients/${clientId}/photos`, {
+          method: "POST",
+          body: fd,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          const detail = err.detail;
+          const msg =
+            typeof detail === "string"
+              ? detail
+              : Array.isArray(detail)
+                ? detail.map((d) => d.msg || d).join(", ")
+                : `Erreur ${res.status}`;
+          throw new Error(msg);
+        }
+        const photo = await res.json();
+        if (!hivernagePhotosByInst[instructionId]) hivernagePhotosByInst[instructionId] = [];
+        hivernagePhotosByInst[instructionId].push(photo);
+        hivernageSteps = collectHivernageFromEditor().map((s) => ({
+          ...s,
+          photos: s.id === instructionId
+            ? [...(hivernagePhotosByInst[s.id] || [])]
+            : s.photos || [],
+        }));
+        renderHivernageEditor();
+        setFeedback($("#nouveau-feedback"), "Photo enregistrée.", true);
+      } catch (err) {
+        setFeedback($("#nouveau-feedback"), err.message || String(err), false);
+      }
+    };
+    input.click();
+  }
+
+  function buildClientPayloadFromForm() {
+    const form = $("#form-nouveau");
+    const latVal = $("#input-lat").value.trim();
+    const lonVal = $("#input-lon").value.trim();
+    const typeEl = form.querySelector('input[name="type_entretien"]:checked');
+    const freqEl = form.querySelector('input[name="frequence_passage"]:checked');
+    const typeEntretien = typeEl ? typeEl.value : "entretien_simple";
+    const payload = {
+      nom: form.nom.value.trim(),
+      prenom: form.prenom.value.trim(),
+      adresse: form.adresse.value.trim() || `GPS ${latVal}, ${lonVal}`,
+      pompe: form.pompe.value.trim(),
+      filtre: form.filtre.value.trim(),
+      robot: form.robot.value.trim(),
+      skimmer: form.skimmer.value.trim(),
+      autres: form.autres.value.trim(),
+      vanne_vidange: form.vanne_vidange.checked,
+      injecteurs: form.injecteurs.checked,
+      type_entretien: typeEntretien,
+      frequence_passage:
+        typeEntretien === "entretien_complet" && freqEl ? freqEl.value : "",
+      date_debut_passage:
+        typeEntretien === "entretien_complet"
+          ? ($("#input-date-passage")?.value || "").trim()
+          : "",
+      creer_compte: !!$("#chk-creer-compte")?.checked,
+      email: ($("#input-email")?.value || "").trim(),
+      telephone: ($("#input-telephone")?.value || "").trim(),
+      password: ($("#input-password")?.value || "").trim(),
+      checklist_hivernage: collectHivernageFromEditor(),
+    };
+    if (latVal && lonVal) {
+      payload.latitude = parseFloat(latVal.replace(",", "."));
+      payload.longitude = parseFloat(lonVal.replace(",", "."));
+    } else if (gpsOverride) {
+      payload.latitude = gpsOverride.latitude;
+      payload.longitude = gpsOverride.longitude;
+    }
+    return payload;
+  }
+
+  async function loadClientPhotos(clientId) {
+    hivernagePhotosByInst = {};
+    if (!clientId) return;
+    try {
+      const res = await api(`/api/clients/${clientId}/photos`);
+      (res.photos || []).forEach((ph) => {
+        const iid = ph.instruction_id;
+        if (!hivernagePhotosByInst[iid]) hivernagePhotosByInst[iid] = [];
+        hivernagePhotosByInst[iid].push(ph);
+      });
+    } catch {
+      /* ignore */
+    }
+  }
 
   function show(name) {
     const leavingVisite =
@@ -67,7 +341,13 @@
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail = data.detail;
-      throw new Error(typeof detail === "string" ? detail : "Erreur serveur");
+      const msg =
+        typeof detail === "string"
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d) => d.msg || JSON.stringify(d)).join(", ")
+            : "Erreur serveur";
+      throw new Error(msg);
     }
     return data;
   }
@@ -158,6 +438,9 @@
     $("#compte-identifiant-line").hidden = true;
     $("#compte-credentials").hidden = true;
     delete $("#btn-submit-nouveau")?.dataset?.continueVisit;
+    hivernageSteps = normalizeHivernageSteps(DEFAULT_CHECKLIST_HIVERNAGE);
+    hivernagePhotosByInst = {};
+    renderHivernageEditor();
     syncBlocPassage();
     syncBlocCompte();
   }
@@ -283,6 +566,8 @@
     $("#input-email").value = client.email || "";
     $("#input-telephone").value = client.telephone || "";
     $("#chk-creer-compte").checked = !!client.compte_actif;
+    hivernageSteps = normalizeHivernageSteps(client.checklist_hivernage);
+    renderHivernageEditor();
     $("#input-password").value = "";
     $("#input-password").placeholder = client.has_password
       ? "Laisser vide pour conserver"
@@ -301,7 +586,7 @@
     syncBlocCompte();
   }
 
-  function ouvrirEditionClient(client) {
+  async function ouvrirEditionClient(client) {
     clientActif = client;
     resetNouveau();
     $("#edit-client-id").value = String(client.id);
@@ -309,6 +594,7 @@
     $("#nouveau-title").textContent = "Modifier le client";
     $("#btn-submit-nouveau").textContent = "Enregistrer les modifications";
     $("#btn-supprimer-client").hidden = false;
+    await loadClientPhotos(client.id);
     remplirFormClient(client);
     show("nouveau");
   }
@@ -397,6 +683,38 @@
     const ok = window.confirm("Passer en visite dépannage pour ce client ?");
     if (!ok) return;
     await ouvrirVisite(clientActif, "depannage");
+  });
+
+  $("#btn-hivernage-visite")?.addEventListener("click", async () => {
+    if (!clientActif) return;
+    if (visiteActive?.type === "hivernage") {
+      setFeedback($("#check-feedback"), "Visite déjà en mode hivernage.", true);
+      return;
+    }
+    const ok = window.confirm("Passer en visite hivernage pour ce client ?");
+    if (!ok) return;
+    await ouvrirVisite(clientActif, "hivernage");
+  });
+
+  $("#btn-reset-hivernage")?.addEventListener("click", () => {
+    if (!window.confirm("Remettre la checklist hivernage par défaut ? Les photos restent liées aux anciennes étapes.")) {
+      return;
+    }
+    hivernageSteps = normalizeHivernageSteps(DEFAULT_CHECKLIST_HIVERNAGE);
+    renderHivernageEditor();
+  });
+
+  $("#btn-add-hivernage-step")?.addEventListener("click", () => {
+    hivernageSteps = collectHivernageFromEditor();
+    hivernageSteps.push({ id: newInstructionId(), label: "", photos: [] });
+    renderHivernageEditor();
+    const inputs = $$("#hivernage-editor input[type='text']");
+    inputs[inputs.length - 1]?.focus();
+  });
+
+  $("#photo-lightbox")?.addEventListener("click", () => closePhotoLightbox());
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closePhotoLightbox();
   });
 
   $("#btn-client").addEventListener("click", async () => {
@@ -982,6 +1300,24 @@
         (item.warn ? `<em>${escapeHtml(item.warn)}</em>` : "") +
         (item.optional ? `<em>optionnel</em>` : "") +
         `</span></button>`;
+      const photos = Array.isArray(item.photos) ? item.photos : [];
+      if (photos.length) {
+        const gallery = document.createElement("div");
+        gallery.className = "check-photos";
+        photos.forEach((ph) => {
+          const url = ph.url || `/api/photos/${ph.id}/file`;
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "check-photo-thumb";
+          btn.innerHTML = `<img src="${escapeHtml(url)}" alt="" loading="lazy" />`;
+          btn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            openPhotoLightbox(url);
+          });
+          gallery.appendChild(btn);
+        });
+        li.appendChild(gallery);
+      }
       ul.appendChild(li);
     });
 
@@ -1051,6 +1387,8 @@
     $("#visite-adresse").textContent = c.adresse;
     const btnDep = $("#btn-depannage-visite");
     if (btnDep) btnDep.hidden = visite.type === "depannage";
+    const btnHiv = $("#btn-hivernage-visite");
+    if (btnHiv) btnHiv.hidden = visite.type === "hivernage";
     renderEquip(c);
     renderChrono(visite);
     renderChecklist(visite.checklist || []);
@@ -1902,34 +2240,17 @@
       return;
     }
     const editId = $("#edit-client-id").value.trim();
-    const latVal = $("#input-lat").value.trim();
-    const lonVal = $("#input-lon").value.trim();
     const typeEl = form.querySelector('input[name="type_entretien"]:checked');
-    const freqEl = form.querySelector('input[name="frequence_passage"]:checked');
     const typeEntretien = typeEl ? typeEl.value : "entretien_simple";
-    const payload = {
-      nom: form.nom.value.trim(),
-      prenom: form.prenom.value.trim(),
-      adresse: form.adresse.value.trim() || `GPS ${latVal}, ${lonVal}`,
-      pompe: form.pompe.value.trim(),
-      filtre: form.filtre.value.trim(),
-      robot: form.robot.value.trim(),
-      skimmer: form.skimmer.value.trim(),
-      autres: form.autres.value.trim(),
-      vanne_vidange: form.vanne_vidange.checked,
-      injecteurs: form.injecteurs.checked,
-      type_entretien: typeEntretien,
-      frequence_passage:
-        typeEntretien === "entretien_complet" && freqEl ? freqEl.value : "",
-      date_debut_passage:
-        typeEntretien === "entretien_complet"
-          ? ($("#input-date-passage")?.value || "").trim()
-          : "",
-      creer_compte: !!$("#chk-creer-compte")?.checked,
-      email: ($("#input-email")?.value || "").trim(),
-      telephone: ($("#input-telephone")?.value || "").trim(),
-      password: ($("#input-password")?.value || "").trim(),
-    };
+    const payload = buildClientPayloadFromForm();
+    if (!payload.checklist_hivernage.length) {
+      setFeedback(
+        $("#nouveau-feedback"),
+        "Ajoutez au moins une étape dans la checklist hivernage.",
+        false
+      );
+      return;
+    }
     if (
       typeEntretien === "entretien_complet" &&
       payload.frequence_passage &&
@@ -1954,16 +2275,12 @@
       );
       return;
     }
-    if (latVal && lonVal) {
-      payload.latitude = parseFloat(latVal.replace(",", "."));
-      payload.longitude = parseFloat(lonVal.replace(",", "."));
-      if (Number.isNaN(payload.latitude) || Number.isNaN(payload.longitude)) {
-        setFeedback($("#nouveau-feedback"), "Latitude / longitude invalides.", false);
-        return;
-      }
-    } else if (gpsOverride) {
-      payload.latitude = gpsOverride.latitude;
-      payload.longitude = gpsOverride.longitude;
+    if (
+      payload.latitude != null &&
+      (Number.isNaN(payload.latitude) || Number.isNaN(payload.longitude))
+    ) {
+      setFeedback($("#nouveau-feedback"), "Latitude / longitude invalides.", false);
+      return;
     }
 
     btn.disabled = true;
@@ -1982,6 +2299,8 @@
       clientActif = client;
       refreshFooter();
       if (editId) {
+        await loadClientPhotos(client.id);
+        hivernageSteps = normalizeHivernageSteps(client.checklist_hivernage);
         remplirFormClient(client);
         afficherCredentials(client);
         if (!client.password_clair) {
@@ -1993,6 +2312,8 @@
         btn.textContent = "Continuer la visite";
         $("#edit-client-id").value = String(client.id);
         $("#nouveau-title").textContent = "Compte créé";
+        await loadClientPhotos(client.id);
+        hivernageSteps = normalizeHivernageSteps(client.checklist_hivernage);
         remplirFormClient(client);
         afficherCredentials(client);
       } else {

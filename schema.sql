@@ -21,7 +21,8 @@ create table if not exists public.clients (
   telephone text default '',
   password_hash text default '',
   compte_actif text default '0',
-  auth_uid text default ''
+  auth_uid text default '',
+  checklist_hivernage text default '[]'
 );
 
 alter table public.clients add column if not exists identifiant text default '';
@@ -30,6 +31,7 @@ alter table public.clients add column if not exists telephone text default '';
 alter table public.clients add column if not exists password_hash text default '';
 alter table public.clients add column if not exists compte_actif text default '0';
 alter table public.clients add column if not exists auth_uid text default '';
+alter table public.clients add column if not exists checklist_hivernage text default '[]';
 
 create unique index if not exists clients_identifiant_uidx
   on public.clients (identifiant)
@@ -117,3 +119,64 @@ create policy aquaclient_fournitures_all on public.fournitures
 drop policy if exists aquaclient_visites_all on public.visites;
 create policy aquaclient_visites_all on public.visites
   for all to anon, authenticated using (true) with check (true);
+
+-- Photos associées aux instructions hivernage (métadonnées)
+create table if not exists public.photos_clients (
+  id uuid primary key,
+  client_id bigint not null references public.clients(id) on delete cascade,
+  instruction_id text not null,
+  storage_path text not null,
+  mime_type text not null default 'image/webp',
+  size_bytes bigint default 0,
+  width int,
+  height int,
+  created_at timestamptz default now()
+);
+
+create index if not exists photos_clients_client_id_idx
+  on public.photos_clients(client_id);
+create index if not exists photos_clients_instruction_idx
+  on public.photos_clients(client_id, instruction_id);
+
+grant all on table public.photos_clients to anon, authenticated, service_role;
+
+alter table public.photos_clients enable row level security;
+
+drop policy if exists aquaclient_photos_clients_all on public.photos_clients;
+create policy aquaclient_photos_clients_all on public.photos_clients
+  for all to anon, authenticated using (true) with check (true);
+
+-- Bucket privé Supabase Storage
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'photos-clients',
+  'photos-clients',
+  false,
+  10485760,
+  array['image/jpeg', 'image/png', 'image/webp']
+)
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists photos_clients_storage_select on storage.objects;
+create policy photos_clients_storage_select on storage.objects
+  for select to anon, authenticated, service_role
+  using (bucket_id = 'photos-clients');
+
+drop policy if exists photos_clients_storage_insert on storage.objects;
+create policy photos_clients_storage_insert on storage.objects
+  for insert to anon, authenticated, service_role
+  with check (bucket_id = 'photos-clients');
+
+drop policy if exists photos_clients_storage_update on storage.objects;
+create policy photos_clients_storage_update on storage.objects
+  for update to anon, authenticated, service_role
+  using (bucket_id = 'photos-clients')
+  with check (bucket_id = 'photos-clients');
+
+drop policy if exists photos_clients_storage_delete on storage.objects;
+create policy photos_clients_storage_delete on storage.objects
+  for delete to anon, authenticated, service_role
+  using (bucket_id = 'photos-clients');
