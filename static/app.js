@@ -42,6 +42,13 @@
     entretien: "Entretien",
     compte: "Compte client",
   };
+  const OPTION_HINTS = {
+    ouverture: "Ajoute des lignes d’info pour l’ouverture (ex. date, niveau d’eau…).",
+    local_technique: "Ajoute des lignes (ex. Pompe Speedeo, Filtre sable…).",
+    hivernage: "Ajoute des lignes pour l’hivernage + photos si besoin.",
+    entretien: "Ajoute des lignes pour l’entretien de ce client.",
+    compte: "Coordonnées et accès client.",
+  };
   /** @type {Record<string, {id:string,label:string,photos:Array}[]>} */
   let optionsSteps = {
     ouverture: [],
@@ -155,7 +162,7 @@
     if (!steps.length) {
       const empty = document.createElement("p");
       empty.className = "muted muted--sm";
-      empty.textContent = "Aucune étape pour l’instant — ajoute-en une ci-dessous.";
+      empty.textContent = "Section vide — appuie sur « Ajouter une ligne ».";
       root.appendChild(empty);
       return;
     }
@@ -179,7 +186,7 @@
       row.dataset.id = step.id;
       row.innerHTML =
         `<div class="hiv-step-row">` +
-        `<input type="text" value="${escapeHtml(step.label)}" placeholder="Instruction…" />` +
+        `<input type="text" value="${escapeHtml(step.label)}" placeholder="Info (ex. Pompe Speedeo 1.5 CV)…" />` +
         `<button type="button" class="hiv-step-remove" data-act="remove">Retirer</button>` +
         `</div>` +
         `<div class="hiv-photos" data-photos></div>`;
@@ -592,16 +599,17 @@
     $$(".option-btn").forEach((b) =>
       b.classList.toggle("is-on", b.dataset.option === key)
     );
-    $$(".option-extra").forEach((el) => {
-      el.hidden = true;
-    });
-    const extra = $(`#extra-${key}`);
-    if (extra) extra.hidden = false;
+    const extraCompte = $("#extra-compte");
+    if (extraCompte) extraCompte.hidden = key !== "compte";
     const stepsBloc = $("#bloc-option-steps");
     if (stepsBloc) stepsBloc.hidden = key === "compte";
-    if (key !== "compte") renderOptionStepsEditor();
-    if (key === "entretien") syncBlocPassage();
-    if (key === "compte") syncBlocCompte();
+    if (key === "compte") {
+      syncBlocCompte();
+    } else {
+      const hint = $("#option-panel-hint");
+      if (hint) hint.textContent = OPTION_HINTS[key] || "Ajoute des lignes d’information.";
+      renderOptionStepsEditor();
+    }
   }
 
   function syncBlocCompte() {

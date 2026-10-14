@@ -309,15 +309,33 @@
           <button type="button" class="btn btn--ghost btn--block" id="btn-gps-actuel">Utiliser ma position GPS</button>
         </div>
 
-        <!-- Options détaillées : visibles seulement en modification -->
+        <!-- Champs techniques cachés (compat API / agenda) -->
+        <div class="visually-hidden" aria-hidden="true">
+          <input name="pompe" value="" />
+          <input name="filtre" value="" />
+          <input name="robot" value="" />
+          <input name="skimmer" value="" />
+          <input name="autres" value="" />
+          <input type="checkbox" name="vanne_vidange" id="chk-vanne" />
+          <input type="checkbox" name="injecteurs" id="chk-injecteurs" />
+          <input type="radio" name="type_entretien" value="entretien_simple" checked />
+          <input type="radio" name="type_entretien" value="entretien_complet" />
+          <input type="radio" name="frequence_passage" value="hebdomadaire" />
+          <input type="radio" name="frequence_passage" value="bihebdomadaire" />
+          <input type="date" name="date_debut_passage" id="input-date-passage" />
+          <input type="checkbox" name="piscine_hivernee" id="chk-piscine-hivernee" />
+          <div id="bloc-passage" hidden><p id="passage-preview"></p></div>
+        </div>
+
+        <!-- Options : visibles seulement en modification -->
         <div id="bloc-edit-options" class="bloc-edit-options" hidden>
           <p class="field-label">Options du client</p>
-          <p class="muted">Choisis une option pour y ajouter des étapes et des photos.</p>
-          <div class="option-grid" id="option-grid" role="tablist">
-            <button type="button" class="option-btn" data-option="ouverture">Ouverture</button>
-            <button type="button" class="option-btn" data-option="local_technique">Local technique</button>
-            <button type="button" class="option-btn" data-option="hivernage">Hivernage</button>
-            <button type="button" class="option-btn" data-option="entretien">Entretien</button>
+          <p class="muted">Ouvre une section, puis ajoute tes lignes d’info et photos.</p>
+          <div class="option-stack" id="option-grid" role="tablist">
+            <button type="button" class="option-btn" data-option="ouverture">Créer une ouverture</button>
+            <button type="button" class="option-btn" data-option="local_technique">Créer un local technique</button>
+            <button type="button" class="option-btn" data-option="hivernage">Créer un hivernage</button>
+            <button type="button" class="option-btn" data-option="entretien">Créer un entretien</button>
             <button type="button" class="option-btn" data-option="compte">Compte client</button>
           </div>
 
@@ -327,67 +345,6 @@
               <button type="button" class="btn btn--ghost btn--sm" id="btn-close-option">Fermer</button>
             </div>
 
-            <!-- Local technique : équipements -->
-            <div id="extra-local_technique" class="option-extra" hidden>
-              <label class="field"><span>Pompe</span><input name="pompe" placeholder="ex. Speedeo 1.5 CV" /></label>
-              <label class="field"><span>Filtre</span><input name="filtre" placeholder="ex. sable / cartouche" /></label>
-              <label class="field"><span>Robot</span><input name="robot" placeholder="ex. Dolphin" /></label>
-              <label class="field"><span>Skimmer</span><input name="skimmer" placeholder="" /></label>
-              <label class="field"><span>Autres</span><input name="autres" placeholder="électrolyseur, couverture…" /></label>
-              <div class="toggle-row">
-                <label class="toggle">
-                  <input type="checkbox" name="vanne_vidange" id="chk-vanne" />
-                  <span>Vanne de vidange</span>
-                </label>
-                <label class="toggle">
-                  <input type="checkbox" name="injecteurs" id="chk-injecteurs" />
-                  <span>Injecteurs</span>
-                </label>
-              </div>
-            </div>
-
-            <!-- Entretien : type + passages -->
-            <div id="extra-entretien" class="option-extra" hidden>
-              <p class="field-label">Type d’entretien</p>
-              <div class="toggle-row" role="radiogroup" aria-label="Type d’entretien">
-                <label class="toggle">
-                  <input type="radio" name="type_entretien" value="entretien_simple" checked />
-                  <span>Entretien classique</span>
-                </label>
-                <label class="toggle">
-                  <input type="radio" name="type_entretien" value="entretien_complet" />
-                  <span>Entretien complet</span>
-                </label>
-              </div>
-              <div id="bloc-passage" class="bloc-passage" hidden>
-                <p class="field-label">Calendrier de passage</p>
-                <div class="toggle-row" role="radiogroup" aria-label="Fréquence">
-                  <label class="toggle">
-                    <input type="radio" name="frequence_passage" value="hebdomadaire" />
-                    <span>1× par semaine</span>
-                  </label>
-                  <label class="toggle">
-                    <input type="radio" name="frequence_passage" value="bihebdomadaire" />
-                    <span>1× toutes les 2 semaines</span>
-                  </label>
-                </div>
-                <label class="field">
-                  <span>Date du premier passage</span>
-                  <input type="date" name="date_debut_passage" id="input-date-passage" />
-                </label>
-                <p class="muted" id="passage-preview"></p>
-              </div>
-            </div>
-
-            <!-- Hivernage : statut -->
-            <div id="extra-hivernage" class="option-extra" hidden>
-              <label class="toggle toggle--block">
-                <input type="checkbox" name="piscine_hivernee" id="chk-piscine-hivernee" />
-                <span>Piscine déjà hivernée</span>
-              </label>
-            </div>
-
-            <!-- Compte client -->
             <div id="extra-compte" class="option-extra" hidden>
               <label class="field">
                 <span>E-mail <em class="opt">(optionnel)</em></span>
@@ -423,13 +380,12 @@
               </div>
             </div>
 
-            <!-- Éditeur d’étapes + photos (pas pour compte) -->
             <div id="bloc-option-steps">
-              <p class="muted muted--sm">Étapes personnalisées + photos (JPG, PNG, WebP).</p>
-              <div id="option-steps-editor" class="hiv-editor" aria-label="Étapes de l’option"></div>
+              <p class="muted muted--sm" id="option-panel-hint">Ajoute des lignes d’information.</p>
+              <div id="option-steps-editor" class="hiv-editor" aria-label="Lignes d’information"></div>
               <div class="hiv-editor-actions">
-                <button type="button" class="btn btn--ghost btn--sm" id="btn-add-option-step">
-                  Ajouter une étape
+                <button type="button" class="btn btn--primary btn--sm" id="btn-add-option-step">
+                  + Ajouter une ligne
                 </button>
               </div>
             </div>
