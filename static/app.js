@@ -77,10 +77,9 @@
   function optionHasContent(key) {
     if (key === "compte") {
       return !!(
-        ($("#input-email")?.value || "").trim() ||
-        ($("#input-telephone")?.value || "").trim() ||
         $("#chk-creer-compte")?.checked ||
-        !$("#compte-credentials")?.hidden
+        !$("#compte-credentials")?.hidden ||
+        !$("#compte-identifiant-line")?.hidden
       );
     }
     const steps = optionsSteps[key] || [];
@@ -1489,8 +1488,6 @@
     syncBlocCompte();
     refreshOptionButtonLabels();
   });
-  $("#input-email")?.addEventListener("input", refreshOptionButtonLabels);
-  $("#input-telephone")?.addEventListener("input", refreshOptionButtonLabels);
   $("#btn-gen-password")?.addEventListener("click", () => {
     $("#input-password").value = genererPasswordLocal();
   });

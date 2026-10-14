@@ -299,6 +299,14 @@
           <input name="adresse" id="input-adresse" autocomplete="off" placeholder="Tapez rue + code postal…" />
           <ul class="suggestions" id="adresse-suggestions" hidden></ul>
         </label>
+        <label class="field">
+          <span>E-mail <em class="opt">(optionnel)</em></span>
+          <input name="email" id="input-email" type="email" autocomplete="off" placeholder="client@email.fr" />
+        </label>
+        <label class="field">
+          <span>Téléphone <em class="opt">(optionnel)</em></span>
+          <input name="telephone" id="input-telephone" type="tel" autocomplete="off" placeholder="06 12 34 56 78" />
+        </label>
 
         <div class="gps-box">
           <p class="field-label">GPS (optionnel)</p>
@@ -355,14 +363,6 @@
             </div>
 
             <div id="extra-compte" class="option-extra" hidden>
-              <label class="field">
-                <span>E-mail <em class="opt">(optionnel)</em></span>
-                <input name="email" id="input-email" type="email" autocomplete="off" placeholder="client@email.fr" />
-              </label>
-              <label class="field">
-                <span>Téléphone <em class="opt">(optionnel)</em></span>
-                <input name="telephone" id="input-telephone" type="tel" autocomplete="off" placeholder="06 12 34 56 78" />
-              </label>
               <label class="toggle toggle--block">
                 <input type="checkbox" name="creer_compte" id="chk-creer-compte" />
                 <span>Création de compte (accès client)</span>
@@ -371,7 +371,7 @@
                 <p class="muted" id="compte-identifiant-line" hidden>
                   Identifiant : <strong id="compte-identifiant">—</strong>
                 </p>
-                <p class="muted" id="compte-hint">E-mail ou téléphone obligatoire pour un compte.</p>
+                <p class="muted" id="compte-hint">Renseigne e-mail ou téléphone en haut de la fiche pour un compte.</p>
                 <label class="field">
                   <span id="label-password">Mot de passe</span>
                   <div class="field-row">
