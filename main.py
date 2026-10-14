@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.7.0"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -64,8 +64,10 @@ CLIENT_FIELDS = [
     "pompe", "filtre", "robot", "skimmer", "vanne_vidange", "injecteurs", "autres",
     "type_entretien", "frequence_passage", "date_debut_passage",
     "identifiant", "email", "telephone", "password_hash", "compte_actif", "auth_uid",
-    "checklist_hivernage", "piscine_hivernee",
+    "checklist_hivernage", "piscine_hivernee", "options_checklists",
 ]
+
+OPTION_CHECKLIST_KEYS = ("ouverture", "local_technique", "hivernage", "entretien")
 
 DEFAULT_CHECKLIST_HIVERNAGE = [
     "Baisse du niveau d'eau",
@@ -330,6 +332,8 @@ class NouveauClient(BaseModel):
     # Checklist hivernage : libellés ou {id, label} (vide autorisé)
     checklist_hivernage: list[Any] = Field(default_factory=list)
     piscine_hivernee: bool | None = None
+    # Checklists par option : { ouverture, local_technique, hivernage, entretien }
+    options_checklists: dict[str, Any] | None = None
 
 
 class ModifierClient(BaseModel):
@@ -354,6 +358,7 @@ class ModifierClient(BaseModel):
     password: str = ""  # si non vide → nouveau mot de passe
     checklist_hivernage: list[Any] = Field(default_factory=list)
     piscine_hivernee: bool | None = None
+    options_checklists: dict[str, Any] | None = None
 
 class Position(BaseModel):
     latitude: float
@@ -701,6 +706,58 @@ def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
 def serialize_checklist_hivernage(items: list[Any] | None) -> str:
     clean = parse_checklist_hivernage(items or [])
     return json.dumps(clean, ensure_ascii=False)
+
+
+def empty_options_checklists() -> dict[str, list[dict[str, str]]]:
+    return {k: [] for k in OPTION_CHECKLIST_KEYS}
+
+
+def parse_options_checklists(raw: Any, *, fallback_hivernage: Any = None) -> dict[str, list[dict[str, str]]]:
+    """Retourne {option: [{id, label}, ...]}."""
+    out = empty_options_checklists()
+    data: Any = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+        else:
+            data = {}
+    if isinstance(data, dict):
+        for key in OPTION_CHECKLIST_KEYS:
+            out[key] = parse_checklist_hivernage(data.get(key))
+    # Rétrocompat : ancienne checklist_hivernage seule
+    if not out["hivernage"] and fallback_hivernage is not None:
+        out["hivernage"] = parse_checklist_hivernage(fallback_hivernage)
+    return out
+
+
+def serialize_options_checklists(data: dict[str, Any] | None) -> str:
+    clean = empty_options_checklists()
+    if isinstance(data, dict):
+        for key in OPTION_CHECKLIST_KEYS:
+            clean[key] = parse_checklist_hivernage(data.get(key))
+    return json.dumps(clean, ensure_ascii=False)
+
+
+def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None) -> dict[str, str]:
+    """Persiste options_checklists + synchronise checklist_hivernage."""
+    existing = existing or {}
+    if getattr(body, "options_checklists", None) is not None:
+        opts = parse_options_checklists(body.options_checklists)
+    else:
+        opts = parse_options_checklists(
+            existing.get("options_checklists"),
+            fallback_hivernage=existing.get("checklist_hivernage"),
+        )
+        if getattr(body, "checklist_hivernage", None) is not None:
+            opts["hivernage"] = parse_checklist_hivernage(body.checklist_hivernage)
+    return {
+        "options_checklists": serialize_options_checklists(opts),
+        "checklist_hivernage": serialize_checklist_hivernage(opts.get("hivernage") or []),
+    }
 
 
 def checklist_storage_needs_ids(raw: Any) -> bool:
@@ -1052,6 +1109,10 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         ),
         "checklist_hivernage": parse_checklist_hivernage(r.get("checklist_hivernage")),
         "piscine_hivernee": from_bool_csv(r.get("piscine_hivernee", "")),
+        "options_checklists": parse_options_checklists(
+            r.get("options_checklists"),
+            fallback_hivernage=r.get("checklist_hivernage"),
+        ),
     }
     if password_clair:
         out["password_clair"] = password_clair
@@ -1928,7 +1989,7 @@ async def create_client(body: NouveauClient):
         "password_hash": password_hash,
         "compte_actif": compte_actif,
         "auth_uid": auth_uid,
-        "checklist_hivernage": serialize_checklist_hivernage(body.checklist_hivernage or []),
+        **_options_fields_from_body(body),
         "piscine_hivernee": bool_csv(bool(body.piscine_hivernee)),
     }
     rows.append(row)
@@ -2048,11 +2109,7 @@ async def update_client(client_id: int, body: ModifierClient):
         "password_hash": password_hash,
         "compte_actif": compte_actif,
         "auth_uid": auth_uid,
-        "checklist_hivernage": serialize_checklist_hivernage(
-            body.checklist_hivernage
-            if body.checklist_hivernage is not None
-            else parse_checklist_hivernage(target.get("checklist_hivernage"))
-        ),
+        **_options_fields_from_body(body, existing=target),
         "piscine_hivernee": bool_csv(
             bool(body.piscine_hivernee)
             if body.piscine_hivernee is not None

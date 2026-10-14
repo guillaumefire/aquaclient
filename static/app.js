@@ -34,13 +34,31 @@
     hivernage: "Hivernage",
   };
 
-  /** @type {{id:string,label:string,photos:Array}[]} */
-  let hivernageSteps = [];
+  const OPTION_KEYS = ["ouverture", "local_technique", "hivernage", "entretien"];
+  const OPTION_LABELS = {
+    ouverture: "Ouverture",
+    local_technique: "Local technique",
+    hivernage: "Hivernage",
+    entretien: "Entretien",
+    compte: "Compte client",
+  };
+  /** @type {Record<string, {id:string,label:string,photos:Array}[]>} */
+  let optionsSteps = {
+    ouverture: [],
+    local_technique: [],
+    hivernage: [],
+    entretien: [],
+  };
+  let activeOption = null;
   /** @type {Record<string, Array>} photos serveur par instruction_id */
   let hivernagePhotosByInst = {};
   /** @type {Record<string, {localId:string,file:File,url:string}[]>} photos locales avant création client */
   let pendingPhotosByInst = {};
   let dashFiltre = "tous";
+
+  function emptyOptionsSteps() {
+    return { ouverture: [], local_technique: [], hivernage: [], entretien: [] };
+  }
 
   function newInstructionId() {
     if (crypto?.randomUUID) return crypto.randomUUID();
@@ -68,8 +86,8 @@
       .filter(Boolean);
   }
 
-  function collectHivernageFromEditor() {
-    const root = $("#hivernage-editor");
+  function collectOptionStepsFromEditor() {
+    const root = $("#option-steps-editor");
     if (!root) return [];
     return $$(".hiv-step", root)
       .map((row) => {
@@ -79,6 +97,20 @@
         return { id, label };
       })
       .filter(Boolean);
+  }
+
+  function syncActiveOptionFromEditor() {
+    if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
+    const labeled = collectOptionStepsFromEditor();
+    const emptyKept = (optionsSteps[activeOption] || []).filter(
+      (s) => !(s.label || "").trim() && !labeled.some((l) => l.id === s.id)
+    );
+    optionsSteps[activeOption] = [...labeled, ...emptyKept];
+  }
+
+  function collectHivernageFromEditor() {
+    syncActiveOptionFromEditor();
+    return optionsSteps.hivernage || [];
   }
 
   function clearPendingPhotos() {
@@ -106,11 +138,21 @@
   }
 
   function renderHivernageEditor() {
-    const root = $("#hivernage-editor");
+    renderOptionStepsEditor();
+  }
+
+  function renderOptionStepsEditor() {
+    const root = $("#option-steps-editor");
     if (!root) return;
+    const key = activeOption;
+    if (!key || !OPTION_KEYS.includes(key)) {
+      root.innerHTML = "";
+      return;
+    }
+    const steps = optionsSteps[key] || [];
 
     root.innerHTML = "";
-    if (!hivernageSteps.length) {
+    if (!steps.length) {
       const empty = document.createElement("p");
       empty.className = "muted muted--sm";
       empty.textContent = "Aucune étape pour l’instant — ajoute-en une ci-dessous.";
@@ -118,7 +160,7 @@
       return;
     }
 
-    hivernageSteps.forEach((step) => {
+    steps.forEach((step) => {
       const photos = [
         ...(step.photos || []),
         ...(hivernagePhotosByInst[step.id] || []),
@@ -194,20 +236,20 @@
       photosEl.appendChild(addBtn);
 
       $(".hiv-step-remove", row)?.addEventListener("click", () => {
-        const kept = collectHivernageFromEditor().filter((s) => s.id !== step.id);
-        // conserver aussi l'étape courante si label encore vide (pas dans collect)
-        hivernageSteps = kept.length
-          ? kept
-          : hivernageSteps.filter((s) => s.id !== step.id);
+        if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
+        syncActiveOptionFromEditor();
+        optionsSteps[activeOption] = (optionsSteps[activeOption] || []).filter(
+          (s) => s.id !== step.id
+        );
         const pend = pendingPhotosByInst[step.id] || [];
         pend.forEach((p) => URL.revokeObjectURL(p.url));
         delete pendingPhotosByInst[step.id];
-        renderHivernageEditor();
+        renderOptionStepsEditor();
       });
 
-      // sync label live dans hivernageSteps
       $("input[type='text']", row)?.addEventListener("input", (ev) => {
-        const s = hivernageSteps.find((x) => x.id === step.id);
+        if (!activeOption) return;
+        const s = (optionsSteps[activeOption] || []).find((x) => x.id === step.id);
         if (s) s.label = ev.target.value;
       });
 
@@ -257,10 +299,10 @@
 
   async function pickAndUploadPhoto(instructionId) {
     // Sync labels depuis l'éditeur
-    const live = collectHivernageFromEditor();
-    const fromLive = live.find((s) => s.id === instructionId);
-    const fromState = hivernageSteps.find((s) => s.id === instructionId);
-    const label = (fromLive?.label || fromState?.label || "").trim();
+    syncActiveOptionFromEditor();
+    const steps = activeOption ? optionsSteps[activeOption] || [] : [];
+    const fromState = steps.find((s) => s.id === instructionId);
+    const label = (fromState?.label || "").trim();
     if (!label) {
       setFeedback(
         $("#nouveau-feedback"),
@@ -269,11 +311,6 @@
       );
       return;
     }
-    // garder les labels à jour
-    hivernageSteps = hivernageSteps.map((s) => {
-      const m = live.find((x) => x.id === s.id);
-      return m ? { ...s, label: m.label } : s;
-    });
 
     const input = document.createElement("input");
     input.type = "file";
@@ -341,6 +378,16 @@
       telephone: ($("#input-telephone")?.value || "").trim(),
       password: ($("#input-password")?.value || "").trim(),
       checklist_hivernage: collectHivernageFromEditor(),
+      options_checklists: (() => {
+        syncActiveOptionFromEditor();
+        const out = {};
+        OPTION_KEYS.forEach((k) => {
+          out[k] = (optionsSteps[k] || [])
+            .map((s) => ({ id: s.id, label: (s.label || "").trim() }))
+            .filter((s) => s.label);
+        });
+        return out;
+      })(),
       piscine_hivernee: !!$("#chk-piscine-hivernee")?.checked,
     };
     if (latVal && lonVal) {
@@ -504,13 +551,57 @@
     $("#compte-credentials").hidden = true;
     delete $("#btn-submit-nouveau")?.dataset?.continueVisit;
     clearPendingPhotos();
-    hivernageSteps = [];
+    optionsSteps = emptyOptionsSteps();
     hivernagePhotosByInst = {};
+    activeOption = null;
     const chkHiv = $("#chk-piscine-hivernee");
     if (chkHiv) chkHiv.checked = false;
-    renderHivernageEditor();
+    setEditMode(false);
+    closeOptionPanel();
     syncBlocPassage();
     syncBlocCompte();
+  }
+
+  function setEditMode(isEdit) {
+    const bloc = $("#bloc-edit-options");
+    if (bloc) bloc.hidden = !isEdit;
+    const del = $("#btn-supprimer-client");
+    if (del && !isEdit) del.hidden = true;
+  }
+
+  function closeOptionPanel() {
+    syncActiveOptionFromEditor();
+    activeOption = null;
+    const panel = $("#option-panel");
+    if (panel) panel.hidden = true;
+    $$(".option-btn").forEach((b) => b.classList.remove("is-on"));
+    $$(".option-extra").forEach((el) => {
+      el.hidden = true;
+    });
+    const stepsBloc = $("#bloc-option-steps");
+    if (stepsBloc) stepsBloc.hidden = false;
+  }
+
+  function openOptionPanel(key) {
+    syncActiveOptionFromEditor();
+    activeOption = key;
+    const panel = $("#option-panel");
+    if (panel) panel.hidden = false;
+    const title = $("#option-panel-title");
+    if (title) title.textContent = OPTION_LABELS[key] || key;
+    $$(".option-btn").forEach((b) =>
+      b.classList.toggle("is-on", b.dataset.option === key)
+    );
+    $$(".option-extra").forEach((el) => {
+      el.hidden = true;
+    });
+    const extra = $(`#extra-${key}`);
+    if (extra) extra.hidden = false;
+    const stepsBloc = $("#bloc-option-steps");
+    if (stepsBloc) stepsBloc.hidden = key === "compte";
+    if (key !== "compte") renderOptionStepsEditor();
+    if (key === "entretien") syncBlocPassage();
+    if (key === "compte") syncBlocCompte();
   }
 
   function syncBlocCompte() {
@@ -637,8 +728,38 @@
     const chkHiv = $("#chk-piscine-hivernee");
     if (chkHiv) chkHiv.checked = !!client.piscine_hivernee;
     clearPendingPhotos();
-    hivernageSteps = normalizeHivernageSteps(client.checklist_hivernage);
-    renderHivernageEditor();
+    const opts = client.options_checklists || {};
+    optionsSteps = emptyOptionsSteps();
+    OPTION_KEYS.forEach((k) => {
+      const raw = opts[k];
+      optionsSteps[k] = normalizeHivernageSteps(
+        Array.isArray(raw) && raw.length
+          ? raw
+          : k === "hivernage"
+            ? client.checklist_hivernage || []
+            : []
+      ).map((s) => ({ ...s, label: s.label || "" }));
+      // normalize filters empty labels — re-add with empty allowed for edit UI from objects
+      if (Array.isArray(raw)) {
+        optionsSteps[k] = raw
+          .map((item) => {
+            if (item && typeof item === "object") {
+              return {
+                id: String(item.id || "").trim() || newInstructionId(),
+                label: String(item.label || item.texte || "").trim(),
+                photos: [],
+              };
+            }
+            const label = String(item || "").trim();
+            return label ? { id: newInstructionId(), label, photos: [] } : null;
+          })
+          .filter(Boolean);
+      }
+    });
+    if (!optionsSteps.hivernage.length && client.checklist_hivernage) {
+      optionsSteps.hivernage = normalizeHivernageSteps(client.checklist_hivernage);
+    }
+    closeOptionPanel();
     $("#input-password").value = "";
     $("#input-password").placeholder = client.has_password
       ? "Laisser vide pour conserver"
@@ -665,6 +786,7 @@
     $("#nouveau-title").textContent = "Modifier le client";
     $("#btn-submit-nouveau").textContent = "Enregistrer les modifications";
     $("#btn-supprimer-client").hidden = false;
+    setEditMode(true);
     await loadClientPhotos(client.id);
     remplirFormClient(client);
     show("nouveau");
@@ -767,21 +889,42 @@
     await ouvrirVisite(clientActif, "hivernage");
   });
 
-  $("#btn-add-hivernage-step")?.addEventListener("click", () => {
-    const labeled = collectHivernageFromEditor();
-    // conserver les lignes encore vides déjà présentes
-    const emptyKept = hivernageSteps.filter(
-      (s) => !(s.label || "").trim() && !labeled.some((l) => l.id === s.id)
+  $("#btn-add-option-step")?.addEventListener("click", () => {
+    if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
+    syncActiveOptionFromEditor();
+    const labeled = (optionsSteps[activeOption] || []).filter((s) => (s.label || "").trim());
+    const emptyKept = (optionsSteps[activeOption] || []).filter(
+      (s) => !(s.label || "").trim()
     );
-    hivernageSteps = [...labeled, ...emptyKept, { id: newInstructionId(), label: "", photos: [] }];
-    renderHivernageEditor();
-    const inputs = $$("#hivernage-editor input[type='text']");
+    optionsSteps[activeOption] = [
+      ...labeled,
+      ...emptyKept,
+      { id: newInstructionId(), label: "", photos: [] },
+    ];
+    renderOptionStepsEditor();
+    const inputs = $$("#option-steps-editor input[type='text']");
     inputs[inputs.length - 1]?.focus();
   });
 
+  $$("#option-grid .option-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.option;
+      if (!key) return;
+      if (activeOption === key) {
+        closeOptionPanel();
+        return;
+      }
+      openOptionPanel(key);
+    });
+  });
+  $("#btn-close-option")?.addEventListener("click", () => closeOptionPanel());
+
   $("#photo-lightbox")?.addEventListener("click", () => closePhotoLightbox());
   document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") closePhotoLightbox();
+    if (ev.key === "Escape") {
+      closePhotoLightbox();
+      closeOptionPanel();
+    }
   });
 
   $("#btn-client").addEventListener("click", async () => {
@@ -2699,7 +2842,7 @@
       }
       if (editId) {
         await loadClientPhotos(client.id);
-        hivernageSteps = normalizeHivernageSteps(client.checklist_hivernage);
+        setEditMode(true);
         remplirFormClient(client);
         afficherCredentials(client);
         if (!client.password_clair) {
@@ -2711,7 +2854,7 @@
         btn.textContent = "Continuer la visite";
         $("#nouveau-title").textContent = "Compte créé";
         await loadClientPhotos(client.id);
-        hivernageSteps = normalizeHivernageSteps(client.checklist_hivernage);
+        setEditMode(true);
         remplirFormClient(client);
         afficherCredentials(client);
       } else {
