@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.2"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -108,6 +108,28 @@ def write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None
             writer.writerow({k: row.get(k, "") for k in fields})
 
 
+def write_one_row(path: Path, fields: list[str], row: dict[str, Any], rows_fallback: list[dict[str, Any]] | None = None) -> None:
+    """Persiste une seule ligne (Supabase upsert) — beaucoup plus rapide qu'un rewrite complet."""
+    table = supabase_db.table_for_path(path)
+    if table and supabase_db.enabled():
+        supabase_db.upsert_row(table, fields, row)
+        return
+    if rows_fallback is not None:
+        write_csv(path, fields, rows_fallback)
+        return
+    rows = read_csv(path)
+    rid = int(row["id"])
+    replaced = False
+    for i, r in enumerate(rows):
+        if int(r.get("id") or 0) == rid:
+            rows[i] = {k: str(row.get(k, "")) for k in fields}
+            replaced = True
+            break
+    if not replaced:
+        rows.append({k: str(row.get(k, "")) for k in fields})
+    write_csv(path, fields, rows)
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     table = supabase_db.table_for_path(path)
     if table and supabase_db.enabled():
@@ -122,6 +144,16 @@ def read_csv(path: Path) -> list[dict[str, str]]:
         return []
     with path.open(newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def read_visite_row(visite_id: int) -> dict[str, str] | None:
+    """Chargement ciblé d'une visite (évite de tout relire)."""
+    if supabase_db.enabled():
+        return supabase_db.read_row("visites", visite_id, VISITE_FIELDS)
+    for r in read_csv(VISITES_CSV):
+        if int(r["id"]) == visite_id:
+            return r
+    return None
 
 
 def _ensure_csv(path: Path, fields: list[str]) -> None:
@@ -2272,15 +2304,27 @@ def create_visite(body: VisiteCreate):
     return _visite_payload(row, client)
 
 
-def _visite_payload(r: dict[str, str], client: dict[str, Any] | None = None) -> dict[str, Any]:
-    if client is None:
-        client = next(
-            (row_client(c) for c in read_csv(CLIENTS_CSV) if int(c["id"]) == int(r["client_id"])),
-            None,
-        )
+def _visite_payload(
+    r: dict[str, str],
+    client: dict[str, Any] | None = None,
+    *,
+    include_client: bool = True,
+    include_photos: bool = True,
+) -> dict[str, Any]:
+    if include_client and client is None:
+        # Un seul client, pas toute la table si possible
+        cid = int(r["client_id"])
+        if supabase_db.enabled():
+            crow = supabase_db.read_row("clients", cid, CLIENT_FIELDS)
+            client = row_client(crow) if crow else None
+        else:
+            client = next(
+                (row_client(c) for c in read_csv(CLIENTS_CSV) if int(c["id"]) == cid),
+                None,
+            )
     duree = r.get("duree_minutes") or ""
     checklist = json.loads(r.get("checklist_json") or "[]")
-    if (r.get("type") or "") == "hivernage":
+    if include_photos and (r.get("type") or "") == "hivernage":
         try:
             photos = list_client_photos(int(r["client_id"]))
             by_inst: dict[str, list[dict[str, Any]]] = {}
@@ -2291,7 +2335,7 @@ def _visite_payload(r: dict[str, str], client: dict[str, Any] | None = None) -> 
                     item["photos"] = by_inst.get(str(item.get("id") or ""), [])
         except Exception:
             pass
-    return {
+    out: dict[str, Any] = {
         "id": int(r["id"]),
         "client_id": int(r["client_id"]),
         "date": r.get("date", ""),
@@ -2300,106 +2344,112 @@ def _visite_payload(r: dict[str, str], client: dict[str, Any] | None = None) -> 
         "debut": r.get("debut") or None,
         "fin": r.get("fin") or None,
         "duree_minutes": float(duree) if str(duree).strip() else None,
-        "client": client,
     }
+    if include_client:
+        out["client"] = client
+    return out
 
 
 @app.get("/api/visites/{visite_id}")
 def get_visite(visite_id: int):
-    for r in read_csv(VISITES_CSV):
-        if int(r["id"]) == visite_id:
-            return _visite_payload(r)
-    raise HTTPException(status_code=404, detail="Visite introuvable")
+    r = read_visite_row(visite_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Visite introuvable")
+    return _visite_payload(r)
 
 
 @app.post("/api/visites/{visite_id}/debut")
 def debut_prestation(visite_id: int):
-    rows = read_csv(VISITES_CSV)
-    for r in rows:
-        if int(r["id"]) == visite_id:
-            if r.get("debut") and not r.get("fin"):
-                return _visite_payload(r)
-            r["debut"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            r["fin"] = ""
-            r["duree_minutes"] = ""
-            write_csv(VISITES_CSV, VISITE_FIELDS, rows)
-            return _visite_payload(r)
-    raise HTTPException(status_code=404, detail="Visite introuvable")
+    r = read_visite_row(visite_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Visite introuvable")
+    if r.get("debut") and not r.get("fin"):
+        return _visite_payload(r, include_client=False, include_photos=False)
+    r["debut"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    r["fin"] = ""
+    r["duree_minutes"] = ""
+    write_one_row(VISITES_CSV, VISITE_FIELDS, r)
+    return _visite_payload(r, include_client=False, include_photos=False)
 
 
 @app.post("/api/visites/{visite_id}/fin")
 def fin_prestation(visite_id: int):
-    rows = read_csv(VISITES_CSV)
-    for r in rows:
-        if int(r["id"]) == visite_id:
-            if not r.get("debut"):
-                raise HTTPException(status_code=400, detail="Appuyez d'abord sur Début de prestation.")
-            if r.get("fin"):
-                return _visite_payload(r)
-            checklist = json.loads(r.get("checklist_json") or "[]")
-            required = [i for i in checklist if not i.get("optional")]
-            incomplete = [i for i in (required or checklist) if not i.get("done")]
-            if incomplete:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cochez toutes les étapes obligatoires avant de terminer.",
-                )
-            fin = datetime.now()
-            r["fin"] = fin.strftime("%Y-%m-%d %H:%M:%S")
-            try:
-                debut = datetime.strptime(r["debut"], "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                debut = datetime.strptime(r["debut"][:16], "%Y-%m-%d %H:%M")
-            minutes = round((fin - debut).total_seconds() / 60, 1)
-            r["duree_minutes"] = str(minutes)
-            write_csv(VISITES_CSV, VISITE_FIELDS, rows)
-            # Fin d'hivernage → marque la piscine comme hivernée
-            if (r.get("type") or "") == "hivernage":
-                try:
-                    cid = int(r["client_id"])
-                    clients = read_csv(CLIENTS_CSV)
-                    for c in clients:
-                        if int(c["id"]) == cid:
-                            c["piscine_hivernee"] = "1"
-                            write_csv(CLIENTS_CSV, CLIENT_FIELDS, clients)
-                            break
-                except Exception:
-                    pass
-            return _visite_payload(r)
-    raise HTTPException(status_code=404, detail="Visite introuvable")
+    r = read_visite_row(visite_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Visite introuvable")
+    if not r.get("debut"):
+        raise HTTPException(status_code=400, detail="Appuyez d'abord sur Début de prestation.")
+    if r.get("fin"):
+        return _visite_payload(r, include_client=False, include_photos=False)
+    checklist = json.loads(r.get("checklist_json") or "[]")
+    required = [i for i in checklist if not i.get("optional")]
+    incomplete = [i for i in (required or checklist) if not i.get("done")]
+    if incomplete:
+        raise HTTPException(
+            status_code=400,
+            detail="Cochez toutes les étapes obligatoires avant de terminer.",
+        )
+    fin = datetime.now()
+    r["fin"] = fin.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        debut = datetime.strptime(r["debut"], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        debut = datetime.strptime(r["debut"][:16], "%Y-%m-%d %H:%M")
+    minutes = round((fin - debut).total_seconds() / 60, 1)
+    r["duree_minutes"] = str(minutes)
+    write_one_row(VISITES_CSV, VISITE_FIELDS, r)
+    # Fin d'hivernage → marque la piscine comme hivernée
+    if (r.get("type") or "") == "hivernage":
+        try:
+            cid = int(r["client_id"])
+            if supabase_db.enabled():
+                crow = supabase_db.read_row("clients", cid, CLIENT_FIELDS)
+                if crow:
+                    crow["piscine_hivernee"] = "1"
+                    write_one_row(CLIENTS_CSV, CLIENT_FIELDS, crow)
+            else:
+                clients = read_csv(CLIENTS_CSV)
+                for c in clients:
+                    if int(c["id"]) == cid:
+                        c["piscine_hivernee"] = "1"
+                        write_csv(CLIENTS_CSV, CLIENT_FIELDS, clients)
+                        break
+        except Exception:
+            pass
+    return _visite_payload(r, include_client=False, include_photos=False)
 
 
 @app.patch("/api/visites/{visite_id}/checklist")
 def update_checklist(visite_id: int, body: ChecklistUpdate):
-    rows = read_csv(VISITES_CSV)
-    for r in rows:
-        if int(r["id"]) == visite_id:
-            checklist = json.loads(r.get("checklist_json") or "[]")
-            by_id = {i["id"]: i for i in checklist}
-            if body.item_id == "lavage_filtre" and body.done:
-                if "vanne_ouvrir" in by_id and not by_id["vanne_ouvrir"].get("done"):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Ouvrez d'abord la vanne de vidange avant le lavage du filtre.",
-                    )
-            if body.item_id == "vanne_fermer" and body.done:
-                if "lavage_filtre" in by_id and not by_id["lavage_filtre"].get("done"):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Faites d'abord le lavage du filtre avant de fermer la vanne.",
-                    )
-            found = False
-            for item in checklist:
-                if item["id"] == body.item_id:
-                    item["done"] = body.done
-                    found = True
-                    break
-            if not found:
-                raise HTTPException(status_code=404, detail="Étape introuvable")
-            r["checklist_json"] = json.dumps(checklist, ensure_ascii=False)
-            write_csv(VISITES_CSV, VISITE_FIELDS, rows)
-            return _visite_payload(r)
-    raise HTTPException(status_code=404, detail="Visite introuvable")
+    r = read_visite_row(visite_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Visite introuvable")
+    checklist = json.loads(r.get("checklist_json") or "[]")
+    by_id = {i["id"]: i for i in checklist}
+    if body.item_id == "lavage_filtre" and body.done:
+        if "vanne_ouvrir" in by_id and not by_id["vanne_ouvrir"].get("done"):
+            raise HTTPException(
+                status_code=400,
+                detail="Ouvrez d'abord la vanne de vidange avant le lavage du filtre.",
+            )
+    if body.item_id == "vanne_fermer" and body.done:
+        if "lavage_filtre" in by_id and not by_id["lavage_filtre"].get("done"):
+            raise HTTPException(
+                status_code=400,
+                detail="Faites d'abord le lavage du filtre avant de fermer la vanne.",
+            )
+    found = False
+    for item in checklist:
+        if item["id"] == body.item_id:
+            item["done"] = body.done
+            found = True
+            break
+    if not found:
+        raise HTTPException(status_code=404, detail="Étape introuvable")
+    r["checklist_json"] = json.dumps(checklist, ensure_ascii=False)
+    write_one_row(VISITES_CSV, VISITE_FIELDS, r)
+    # Réponse légère : pas de rechargement photos / client
+    return _visite_payload(r, include_client=False, include_photos=False)
 
 
 @app.post("/api/ia")
@@ -2710,10 +2760,26 @@ def update_facture_statut(facture_id: int, body: FactureStatutUpdate):
 async def transcribe(audio: UploadFile = File(...)):
     import numpy as np
 
-    suffix = Path(audio.filename or "audio.wav").suffix.lower() or ".wav"
+    name = (audio.filename or "audio.webm").lower()
+    suffix = Path(name).suffix.lower() or ".webm"
+    # iOS envoie souvent audio/mp4 sans extension fiable
+    ctype = (audio.content_type or "").lower()
+    if suffix in {".bin", ".dat", ""} or suffix == ".wav" and "mp4" in ctype:
+        if "mp4" in ctype or "aac" in ctype or "m4a" in ctype:
+            suffix = ".mp4"
+        elif "ogg" in ctype:
+            suffix = ".ogg"
+        elif "webm" in ctype:
+            suffix = ".webm"
+        elif "mpeg" in ctype or "mp3" in ctype:
+            suffix = ".mp3"
+
     raw = await audio.read()
-    if not raw or len(raw) < 200:
-        raise HTTPException(status_code=400, detail="Enregistrement trop court. Parlez au moins 4 secondes.")
+    if not raw or len(raw) < 120:
+        raise HTTPException(
+            status_code=400,
+            detail="Enregistrement trop court. Maintenez le bouton et parlez 2–3 secondes.",
+        )
 
     tmp_path = None
     try:
@@ -2727,15 +2793,18 @@ async def transcribe(audio: UploadFile = File(...)):
                 tmp_path = tmp.name
             samples = audio_to_float32(tmp_path)
 
-        if samples is None or len(samples) < 8000:  # < 0.5 s
-            raise HTTPException(status_code=400, detail="Audio trop court. Parlez un peu plus longtemps.")
+        if samples is None or len(samples) < 4800:  # ~0.3 s @ 16 kHz
+            raise HTTPException(
+                status_code=400,
+                detail="Audio trop court. Maintenez plus longtemps en parlant.",
+            )
 
         rms = float(np.sqrt(np.mean(samples ** 2)))
         peak = float(np.max(np.abs(samples)))
-        if peak < 0.008 and rms < 0.0015:
+        if peak < 0.004 and rms < 0.0008:
             raise HTTPException(
                 status_code=400,
-                detail="Micro silencieux. Vérifiez le bon micro Windows et le volume d’entrée.",
+                detail="Micro silencieux. Autorisez le micro et parlez près du téléphone.",
             )
 
         model = get_whisper()
@@ -2746,8 +2815,9 @@ async def transcribe(audio: UploadFile = File(...)):
         )
         texte = ""
         for kwargs in (
-            dict(vad_filter=False, no_speech_threshold=0.5, beam_size=5, temperature=0.0),
-            dict(vad_filter=False, no_speech_threshold=0.7, beam_size=5, temperature=0.2),
+            dict(vad_filter=False, no_speech_threshold=0.45, beam_size=5, temperature=0.0),
+            dict(vad_filter=False, no_speech_threshold=0.65, beam_size=5, temperature=0.2),
+            dict(vad_filter=True, no_speech_threshold=0.5, beam_size=3, temperature=0.0),
         ):
             segments, _info = model.transcribe(
                 samples,
@@ -2771,7 +2841,7 @@ async def transcribe(audio: UploadFile = File(...)):
     if not texte:
         raise HTTPException(
             status_code=400,
-            detail="Rien compris. Parlez clairement : note / fourniture / analyse…",
+            detail="Rien compris. Dites clairement : note / fourniture / analyse…",
         )
     return {"texte": texte}
 

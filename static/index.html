@@ -236,19 +236,22 @@
           </div>
           <span class="rec-cursor" id="rec-cursor" hidden title="Capture"></span>
         </div>
-        <div class="vocal-actions">
-          <button type="button" class="btn btn--ghost btn--block" id="btn-ecoute" aria-pressed="false">
-            Écoute auto · OFF
-          </button>
-          <button type="button" class="btn btn--primary btn--block btn-parler" id="btn-parler">
-            Maintenir pour parler
-          </button>
-        </div>
         <div class="intent-row">
           <button type="button" class="chip" data-intent="note">Note</button>
           <button type="button" class="chip" data-intent="fourniture">Fourniture</button>
           <button type="button" class="chip" data-intent="analyse">Analyse</button>
         </div>
+        <div class="vocal-actions">
+          <button type="button" class="btn btn--primary btn--block btn-parler" id="btn-parler">
+            Maintenir pour parler
+          </button>
+          <button type="button" class="btn btn--ghost btn--block" id="btn-ecoute" aria-pressed="false">
+            Écoute auto · OFF
+          </button>
+        </div>
+        <p class="muted muted--sm" id="vocal-mobile-hint">
+          Astuce téléphone : tapez Note / Fourniture / Analyse, puis maintenez le bouton en parlant.
+        </p>
         <button type="button" class="mic" id="btn-mic" aria-pressed="false" hidden>
           <span class="mic-pulse" aria-hidden="true"></span>
           <span class="mic-label" id="mic-label">Micro</span>

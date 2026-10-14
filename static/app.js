@@ -373,7 +373,10 @@
       screens.visite.classList.contains("screen--active") && name !== "visite";
     Object.values(screens).forEach((el) => el.classList.remove("screen--active"));
     screens[name].classList.add("screen--active");
-    if (leavingVisite) stopWakeListen();
+    if (leavingVisite) {
+      stopWakeListen();
+      if (typeof releaseSharedMic === "function") releaseSharedMic();
+    }
   }
 
   function setFeedback(el, message, ok) {
@@ -1482,22 +1485,51 @@
     });
 
     $$(".check-btn", ul).forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        if (!visiteActive) return;
+      btn.addEventListener("click", () => {
+        if (!visiteActive || btn.dataset.busy === "1") return;
         const item = visiteActive.checklist.find((i) => i.id === btn.dataset.item);
-        const next = !(item && item.done);
+        if (!item) return;
+        const next = !item.done;
+        const prev = !!item.done;
+        // Feedback immédiat (sans attendre Supabase)
+        item.done = next;
+        const li = btn.closest(".check-item");
+        if (li) li.classList.toggle("is-done", next);
+        const mark = $(".check-mark", btn);
+        if (mark) mark.textContent = next ? "✓" : "";
+        updateFinButton(visiteActive);
         setFeedback($("#check-feedback"), "", null);
-        try {
-          const res = await api(`/api/visites/${visiteActive.id}/checklist`, {
-            method: "PATCH",
-            body: JSON.stringify({ item_id: btn.dataset.item, done: next }),
+        btn.dataset.busy = "1";
+        api(`/api/visites/${visiteActive.id}/checklist`, {
+          method: "PATCH",
+          body: JSON.stringify({ item_id: btn.dataset.item, done: next }),
+        })
+          .then((res) => {
+            const photosById = Object.fromEntries(
+              (visiteActive.checklist || []).map((i) => [i.id, i.photos])
+            );
+            const checklist = (res.checklist || []).map((i) => ({
+              ...i,
+              photos: i.photos || photosById[i.id] || [],
+            }));
+            visiteActive = {
+              ...visiteActive,
+              ...res,
+              client: visiteActive.client,
+              checklist,
+            };
+            updateFinButton(visiteActive);
+          })
+          .catch((err) => {
+            item.done = prev;
+            if (li) li.classList.toggle("is-done", prev);
+            if (mark) mark.textContent = prev ? "✓" : "";
+            updateFinButton(visiteActive);
+            setFeedback($("#check-feedback"), err.message, false);
+          })
+          .finally(() => {
+            delete btn.dataset.busy;
           });
-          visiteActive = { ...visiteActive, ...res };
-          renderChecklist(res.checklist);
-          updateFinButton(visiteActive);
-        } catch (err) {
-          setFeedback($("#check-feedback"), err.message, false);
-        }
       });
     });
     updateFinButton(visiteActive);
@@ -1556,24 +1588,60 @@
     setFeedback($("#check-feedback"), "", null);
     $("#ia-texte").value = "";
     setIntent(null);
-    await refreshHistorique(c.id);
-    // Écoute mots-clés (pas d’enregistrement tant qu’on n’a pas dit note/fourniture/analyse)
-    await startWakeListen();
+    // Historique en arrière-plan
+    refreshHistorique(c.id).catch(() => {});
+    // Téléphone : le Web Speech est peu fiable → privilégier « Maintenir pour parler »
+    if (isMobileVocal()) {
+      stopWakeListen();
+      setFeedback(
+        $("#ia-feedback"),
+        "Sur téléphone : choisissez Note / Fourniture / Analyse puis maintenez le bouton pour parler.",
+        null
+      );
+      ensureSharedMic().catch(() => {});
+    } else {
+      startWakeListen().catch(() => {});
+    }
   }
 
-  $("#btn-debut").addEventListener("click", async () => {
-    if (!visiteActive) return;
-    try {
-      const res = await api(`/api/visites/${visiteActive.id}/debut`, { method: "POST", body: "{}" });
-      visiteActive = { ...visiteActive, ...res };
-      renderChrono(visiteActive);
-      setFeedback($("#check-feedback"), "Prestation démarrée.", true);
-    } catch (err) {
-      setFeedback($("#check-feedback"), err.message, false);
-    }
+  function nowLocalStamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  $("#btn-debut").addEventListener("click", () => {
+    if (!visiteActive || visiteActive.debut) return;
+    const btn = $("#btn-debut");
+    if (btn?.dataset.busy === "1") return;
+    if (btn) btn.dataset.busy = "1";
+    const prevDebut = visiteActive.debut;
+    visiteActive.debut = nowLocalStamp();
+    visiteActive.fin = null;
+    visiteActive.duree_minutes = null;
+    renderChrono(visiteActive);
+    setFeedback($("#check-feedback"), "Prestation démarrée.", true);
+    api(`/api/visites/${visiteActive.id}/debut`, { method: "POST", body: "{}" })
+      .then((res) => {
+        visiteActive = {
+          ...visiteActive,
+          ...res,
+          client: visiteActive.client,
+          checklist: visiteActive.checklist,
+        };
+        renderChrono(visiteActive);
+      })
+      .catch((err) => {
+        visiteActive.debut = prevDebut;
+        renderChrono(visiteActive);
+        setFeedback($("#check-feedback"), err.message, false);
+      })
+      .finally(() => {
+        if (btn) delete btn.dataset.busy;
+      });
   });
 
-  $("#btn-fin").addEventListener("click", async () => {
+  $("#btn-fin").addEventListener("click", () => {
     if (!visiteActive) return;
     if (!visiteActive.debut || visiteActive.fin) return;
     if (!checklistComplete(visiteActive.checklist || [])) {
@@ -1585,18 +1653,38 @@
       updateFinButton(visiteActive);
       return;
     }
-    try {
-      const res = await api(`/api/visites/${visiteActive.id}/fin`, { method: "POST", body: "{}" });
-      visiteActive = { ...visiteActive, ...res };
-      renderChrono(visiteActive);
-      setFeedback(
-        $("#check-feedback"),
-        `Prestation terminée — ${formatDuree(res.duree_minutes)}.`,
-        true
-      );
-    } catch (err) {
-      setFeedback($("#check-feedback"), err.message, false);
-    }
+    const btn = $("#btn-fin");
+    if (btn?.dataset.busy === "1") return;
+    if (btn) btn.dataset.busy = "1";
+    const prevFin = visiteActive.fin;
+    const prevDuree = visiteActive.duree_minutes;
+    visiteActive.fin = nowLocalStamp();
+    renderChrono(visiteActive);
+    setFeedback($("#check-feedback"), "Prestation terminée.", true);
+    api(`/api/visites/${visiteActive.id}/fin`, { method: "POST", body: "{}" })
+      .then((res) => {
+        visiteActive = {
+          ...visiteActive,
+          ...res,
+          client: visiteActive.client,
+          checklist: visiteActive.checklist,
+        };
+        renderChrono(visiteActive);
+        setFeedback(
+          $("#check-feedback"),
+          `Prestation terminée — ${formatDuree(res.duree_minutes)}.`,
+          true
+        );
+      })
+      .catch((err) => {
+        visiteActive.fin = prevFin;
+        visiteActive.duree_minutes = prevDuree;
+        renderChrono(visiteActive);
+        setFeedback($("#check-feedback"), err.message, false);
+      })
+      .finally(() => {
+        if (btn) delete btn.dataset.busy;
+      });
   });
 
   // ── Intent + vocal (écoute mots-clés uniquement, pas d’enreg. en boucle) ───
@@ -1610,16 +1698,22 @@
   let holdRecorder = null;
   let holdChunks = [];
   let holdRecording = false;
+  let holdStartedAt = 0;
+  let sharedMicStream = null;
   let processingVocal = false;
   /** idle | wake | capture | busy */
   let voicePhase = "idle";
-  const CAPTURE_TIMEOUT_MS = 8000;
+  const CAPTURE_TIMEOUT_MS = isMobileVocalSafe() ? 14000 : 8000;
 
-  function isMobileVocal() {
+  function isMobileVocalSafe() {
     return (
       /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "") ||
       (navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent || ""))
     );
+  }
+
+  function isMobileVocal() {
+    return isMobileVocalSafe();
   }
 
   function setIntent(name) {
@@ -1950,10 +2044,12 @@
     const rec = new SR();
     speechRec = rec;
     rec.lang = "fr-FR";
-    // Sur téléphone : sessions courtes (évite la boucle continue)
+    // Mobile : sessions courtes + interim pour attraper les mots-clés plus tôt
     rec.continuous = !mobile;
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
+    rec.interimResults = true;
+    rec.maxAlternatives = 3;
+
+    let interimWakeArmed = false;
 
     rec.onstart = () => {
       if (voicePhase === "capture") setListenStatus("capture");
@@ -1965,15 +2061,35 @@
 
     rec.onresult = (event) => {
       let finalTxt = "";
+      let interimTxt = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalTxt += event.results[i][0].transcript;
+        const piece = event.results[i][0]?.transcript || "";
+        if (event.results[i].isFinal) finalTxt += piece;
+        else interimTxt += piece;
+      }
+      const live = (finalTxt || interimTxt).trim();
+      if (live && (voicePhase === "capture" || voicePhase === "wake")) {
+        $("#ia-texte").value = live;
+      }
+
+      // Wake anticipé sur interim (téléphone coupe souvent avant le final)
+      if (
+        mobile &&
+        !interimWakeArmed &&
+        (voicePhase === "wake" || voicePhase === "idle") &&
+        detectWakeIntent(interimTxt)
+      ) {
+        interimWakeArmed = true;
+        const w = detectWakeIntent(interimTxt);
+        if (w && isMostlyWakeWord(interimTxt)) {
+          enterCapture(w);
+          return;
         }
       }
+
       const txt = finalTxt.trim();
       if (!txt) return;
 
-      // Phase wake : uniquement si mot-clé présent
       if (voicePhase === "wake" || voicePhase === "idle") {
         if (!detectWakeIntent(txt) && !armedIntent) return;
         traiterTexteVocal(txt);
@@ -1995,13 +2111,18 @@
         setListenStatus("idle");
         return;
       }
-      // network / etc. : on retentera via onend
+      if (err === "network" && mobile) {
+        setFeedback(
+          $("#ia-feedback"),
+          "Écoute auto instable sur ce téléphone — utilisez « Maintenir pour parler ».",
+          false
+        );
+      }
     };
 
     rec.onend = () => {
       speechRec = null;
       if (!wantWakeListen || processingVocal || holdRecording) return;
-      // Redémarrer pour réécouter les mots-clés seulement (pas un nouvel « enregistrement »)
       scheduleSpeechRestart();
     };
 
@@ -2075,14 +2196,32 @@
     return "";
   }
 
+  async function ensureSharedMic() {
+    if (sharedMicStream && sharedMicStream.active) return sharedMicStream;
+    sharedMicStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+    });
+    return sharedMicStream;
+  }
+
+  function releaseSharedMic() {
+    if (sharedMicStream) {
+      sharedMicStream.getTracks().forEach((t) => t.stop());
+      sharedMicStream = null;
+    }
+  }
+
   async function startHoldRecord() {
     if (holdRecording || processingVocal) return;
     // Couper l’écoute auto pendant le maintien (évite la double capture / boucle)
     stopSpeechRec({ keepWanted: true });
     try {
-      holdStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+      holdStream = await ensureSharedMic();
       holdChunks = [];
       const mime = pickRecorderMime();
       holdRecorder = mime
@@ -2091,11 +2230,21 @@
       holdRecorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) holdChunks.push(e.data);
       };
-      holdRecorder.start(250);
+      // timeslice plus court = premier chunk plus vite sur Android
+      holdRecorder.start(isMobileVocal() ? 120 : 250);
       holdRecording = true;
-      voicePhase = "capture";
+      holdStartedAt = Date.now();
+      if (intentForce || armedIntent) {
+        armedIntent = intentForce || armedIntent;
+        voicePhase = "capture";
+      } else {
+        voicePhase = "capture";
+      }
       setListenStatus("capture");
-      setFeedback($("#ia-feedback"), "Parlez… relâchez pour envoyer.", null);
+      const hint = armedIntent || intentForce
+        ? `Parlez la ${armedIntent || intentForce}… relâchez pour envoyer.`
+        : "Parlez (note / fourniture / analyse)… relâchez pour envoyer.";
+      setFeedback($("#ia-feedback"), hint, null);
       const btn = $("#btn-parler");
       if (btn) {
         btn.classList.add("is-recording");
@@ -2109,6 +2258,29 @@
 
   async function stopHoldRecord() {
     if (!holdRecording || !holdRecorder) return;
+    // Évite les taps accidentels (< 350 ms)
+    const elapsed = Date.now() - (holdStartedAt || 0);
+    if (elapsed < 350) {
+      holdRecording = false;
+      try {
+        holdRecorder.onstop = null;
+        holdRecorder.stop();
+      } catch {
+        /* */
+      }
+      holdRecorder = null;
+      holdChunks = [];
+      const btn = $("#btn-parler");
+      if (btn) {
+        btn.classList.remove("is-recording");
+        btn.textContent = "Maintenir pour parler";
+      }
+      setFeedback($("#ia-feedback"), "Trop court — maintenez en parlant 2–3 secondes.", false);
+      backToWakeOrIdle();
+      scheduleSpeechRestart();
+      return;
+    }
+
     holdRecording = false;
     const btn = $("#btn-parler");
     if (btn) {
@@ -2118,24 +2290,26 @@
     setListenStatus("busy");
     setFeedback($("#ia-feedback"), "Transcription…", null);
 
+    const recorder = holdRecorder;
+    const chunks = holdChunks;
+    const mimeType = recorder.mimeType || "";
     const blob = await new Promise((resolve) => {
-      holdRecorder.onstop = () => {
-        resolve(new Blob(holdChunks, { type: holdRecorder.mimeType || "audio/webm" }));
+      recorder.onstop = () => {
+        resolve(new Blob(chunks, { type: mimeType || "audio/webm" }));
       };
       try {
-        holdRecorder.stop();
+        if (recorder.state !== "inactive") recorder.requestData?.();
+        recorder.stop();
       } catch {
-        resolve(null);
+        resolve(chunks.length ? new Blob(chunks, { type: mimeType || "audio/webm" }) : null);
       }
     });
-    if (holdStream) {
-      holdStream.getTracks().forEach((t) => t.stop());
-      holdStream = null;
-    }
+    // Ne coupe PAS le micro partagé (réutilisé au prochain maintien)
     holdRecorder = null;
     holdChunks = [];
+    holdStream = null;
 
-    if (!blob || blob.size < 800) {
+    if (!blob || blob.size < 350) {
       setFeedback($("#ia-feedback"), "Trop court — maintenez plus longtemps.", false);
       backToWakeOrIdle();
       scheduleSpeechRestart();
@@ -2143,13 +2317,31 @@
     }
     try {
       const fd = new FormData();
-      const type = blob.type || "";
-      const ext = type.includes("mp4") || type.includes("aac") ? "mp4" : type.includes("ogg") ? "ogg" : "webm";
+      const type = blob.type || mimeType || "";
+      const ext =
+        type.includes("mp4") || type.includes("aac") || type.includes("m4a")
+          ? "mp4"
+          : type.includes("ogg")
+            ? "ogg"
+            : type.includes("mpeg") || type.includes("mp3")
+              ? "mp3"
+              : "webm";
       fd.append("audio", blob, `note.${ext}`);
       const res = await fetch("/api/transcribe", { method: "POST", body: fd });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || "Transcription échouée");
-      await traiterTexteVocal(data.texte || "", { fromHold: true });
+      if (!res.ok) {
+        const detail = data.detail;
+        throw new Error(
+          typeof detail === "string" ? detail : "Transcription échouée"
+        );
+      }
+      let texte = data.texte || "";
+      // Si une puce est active, préfixer le mot-clé manquant
+      const forced = armedIntent || intentForce;
+      if (forced && texte && !detectWakeIntent(texte)) {
+        texte = `${forced} ${texte}`;
+      }
+      await traiterTexteVocal(texte, { fromHold: true });
     } catch (err) {
       setFeedback($("#ia-feedback"), err.message || "Erreur vocal.", false);
       backToWakeOrIdle();
@@ -2248,19 +2440,36 @@
 
   const btnParler = $("#btn-parler");
   if (btnParler) {
+    let holdPointerId = null;
+    let holdFromTouch = false;
     const down = (e) => {
+      if (e.button != null && e.button !== 0) return;
+      if (holdRecording || holdPointerId != null) return;
       e.preventDefault();
+      holdFromTouch = e.pointerType === "touch" || e.type === "touchstart";
+      holdPointerId = e.pointerId ?? "touch";
       try {
-        btnParler.setPointerCapture(e.pointerId);
+        if (e.pointerId != null) btnParler.setPointerCapture(e.pointerId);
       } catch {
         /* */
       }
       startHoldRecord();
     };
     const up = (e) => {
+      if (holdPointerId == null && !holdRecording) return;
+      if (
+        e.pointerId != null &&
+        holdPointerId != null &&
+        holdPointerId !== "touch" &&
+        e.pointerId !== holdPointerId
+      ) {
+        return;
+      }
       e.preventDefault();
+      holdPointerId = null;
+      holdFromTouch = false;
       try {
-        if (btnParler.hasPointerCapture?.(e.pointerId)) {
+        if (e.pointerId != null && btnParler.hasPointerCapture?.(e.pointerId)) {
           btnParler.releasePointerCapture(e.pointerId);
         }
       } catch {
@@ -2271,7 +2480,41 @@
     btnParler.addEventListener("pointerdown", down);
     btnParler.addEventListener("pointerup", up);
     btnParler.addEventListener("pointercancel", up);
-    // Ne pas couper sur pointerleave (téléphone : le doigt bouge un peu)
+    btnParler.addEventListener("lostpointercapture", () => {
+      if (holdRecording) {
+        holdPointerId = null;
+        stopHoldRecord();
+      }
+    });
+    // Fallback si pas d’événements pointer (vieux WebViews)
+    if (!window.PointerEvent) {
+      btnParler.addEventListener(
+        "touchstart",
+        (e) => {
+          if (e.touches.length > 1) return;
+          e.preventDefault();
+          down(e);
+        },
+        { passive: false }
+      );
+      btnParler.addEventListener(
+        "touchend",
+        (e) => {
+          e.preventDefault();
+          up(e);
+        },
+        { passive: false }
+      );
+      btnParler.addEventListener(
+        "touchcancel",
+        (e) => {
+          e.preventDefault();
+          up(e);
+        },
+        { passive: false }
+      );
+    }
+    btnParler.addEventListener("contextmenu", (e) => e.preventDefault());
   }
 
   $("#btn-recaler-gps").addEventListener("click", async () => {

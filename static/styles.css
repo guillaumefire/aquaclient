@@ -889,7 +889,10 @@ body:has(#screen-home.screen--active) .brand-tag {
 .btn-parler {
   margin-bottom: 0;
   user-select: none;
+  -webkit-user-select: none;
   touch-action: none;
+  min-height: 3.1rem;
+  font-size: 1.05rem;
 }
 
 .btn-parler.is-recording {

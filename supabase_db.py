@@ -424,6 +424,25 @@ def write_table(table: str, fields: list[str], rows: list[dict[str, Any]]) -> No
         sb.table(table).upsert(chunk).execute()
 
 
+def read_row(table: str, row_id: int, fields: list[str] | None = None) -> dict[str, str] | None:
+    """Lit une seule ligne par id (rapide)."""
+    sb = get_client()
+    resp = sb.table(table).select("*").eq("id", row_id).limit(1).execute()
+    rows = resp.data or []
+    if not rows:
+        return None
+    return _row_out(rows[0], fields)
+
+
+def upsert_row(table: str, fields: list[str], row: dict[str, Any]) -> None:
+    """Upsert d'une seule ligne — pour les clics checklist / chrono."""
+    sb = get_client()
+    payload = _row_in(row, fields)
+    if payload.get("id") is None:
+        raise ValueError("id manquant pour upsert_row")
+    sb.table(table).upsert(payload).execute()
+
+
 def seed_from_csv_if_empty(
     csv_readers: dict[str, tuple[Path, list[str], Any]],
 ) -> None:
