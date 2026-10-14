@@ -1806,6 +1806,15 @@ body:has(#screen-home.screen--active) .brand-tag {
   margin: 0.65rem 0 0.85rem;
 }
 
+.option-item {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.option-item .option-panel {
+  margin: 0;
+}
+
 .option-btn {
   border: 1px solid rgba(255, 255, 255, 0.55);
   border-radius: var(--radius-sm);
@@ -1816,6 +1825,7 @@ body:has(#screen-home.screen--active) .brand-tag {
   padding: 1rem 1.05rem;
   cursor: pointer;
   text-align: left;
+  width: 100%;
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
 }
 
@@ -1855,16 +1865,8 @@ body:has(#screen-home.screen--active) .brand-tag {
 .option-panel-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 0.5rem;
-}
-
-.option-panel-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 1.15rem;
-  font-weight: 600;
-  color: var(--teal-deep);
 }
 
 .option-extra {

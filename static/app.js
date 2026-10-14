@@ -42,6 +42,13 @@
     entretien: "Entretien",
     compte: "Compte client",
   };
+  const OPTION_CREATE_LABELS = {
+    ouverture: "Créer une ouverture",
+    local_technique: "Créer un local technique",
+    hivernage: "Créer un hivernage",
+    entretien: "Créer un entretien",
+    compte: "Créer un compte client",
+  };
   const OPTION_HINTS = {
     ouverture: "Ajoute des lignes d’info pour l’ouverture (ex. date, niveau d’eau…).",
     local_technique: "Ajoute des lignes (ex. Pompe Speedeo, Filtre sable…).",
@@ -65,6 +72,49 @@
 
   function emptyOptionsSteps() {
     return { ouverture: [], local_technique: [], hivernage: [], entretien: [] };
+  }
+
+  function optionHasContent(key) {
+    if (key === "compte") {
+      return !!(
+        ($("#input-email")?.value || "").trim() ||
+        ($("#input-telephone")?.value || "").trim() ||
+        $("#chk-creer-compte")?.checked ||
+        !$("#compte-credentials")?.hidden
+      );
+    }
+    const steps = optionsSteps[key] || [];
+    return steps.some((s) => {
+      if ((s.label || "").trim()) return true;
+      if ((s.photos || []).length) return true;
+      if ((hivernagePhotosByInst[s.id] || []).length) return true;
+      if ((pendingPhotosByInst[s.id] || []).length) return true;
+      return false;
+    });
+  }
+
+  function refreshOptionButtonLabels() {
+    $$("#option-grid .option-btn").forEach((btn) => {
+      const key = btn.dataset.option;
+      if (!key) return;
+      btn.textContent = optionHasContent(key)
+        ? OPTION_LABELS[key] || key
+        : OPTION_CREATE_LABELS[key] || OPTION_LABELS[key] || key;
+    });
+  }
+
+  function mountOptionPanelUnder(key) {
+    const panel = $("#option-panel");
+    const item = $(`#option-grid [data-option-item="${key}"]`);
+    if (!panel || !item) return;
+    item.appendChild(panel);
+  }
+
+  function unmountOptionPanel() {
+    const panel = $("#option-panel");
+    const stack = $("#option-grid");
+    if (!panel || !stack) return;
+    stack.after(panel);
   }
 
   function newInstructionId() {
@@ -146,6 +196,7 @@
 
   function renderHivernageEditor() {
     renderOptionStepsEditor();
+    refreshOptionButtonLabels();
   }
 
   function renderOptionStepsEditor() {
@@ -252,12 +303,14 @@
         pend.forEach((p) => URL.revokeObjectURL(p.url));
         delete pendingPhotosByInst[step.id];
         renderOptionStepsEditor();
+        refreshOptionButtonLabels();
       });
 
       $("input[type='text']", row)?.addEventListener("input", (ev) => {
         if (!activeOption) return;
         const s = (optionsSteps[activeOption] || []).find((x) => x.id === step.id);
         if (s) s.label = ev.target.value;
+        refreshOptionButtonLabels();
       });
 
       root.appendChild(row);
@@ -574,28 +627,43 @@
     if (bloc) bloc.hidden = !isEdit;
     const del = $("#btn-supprimer-client");
     if (del && !isEdit) del.hidden = true;
+    if (isEdit) refreshOptionButtonLabels();
+  }
+
+  function pruneEmptyOptionSteps(key) {
+    if (!key || !OPTION_KEYS.includes(key)) return;
+    optionsSteps[key] = (optionsSteps[key] || []).filter((s) => {
+      if ((s.label || "").trim()) return true;
+      if ((hivernagePhotosByInst[s.id] || []).length) return true;
+      if ((pendingPhotosByInst[s.id] || []).length) return true;
+      return false;
+    });
   }
 
   function closeOptionPanel() {
     syncActiveOptionFromEditor();
+    const closing = activeOption;
+    pruneEmptyOptionSteps(closing);
     activeOption = null;
     const panel = $("#option-panel");
     if (panel) panel.hidden = true;
+    unmountOptionPanel();
     $$(".option-btn").forEach((b) => b.classList.remove("is-on"));
     $$(".option-extra").forEach((el) => {
       el.hidden = true;
     });
     const stepsBloc = $("#bloc-option-steps");
     if (stepsBloc) stepsBloc.hidden = false;
+    refreshOptionButtonLabels();
   }
 
   function openOptionPanel(key) {
     syncActiveOptionFromEditor();
+    if (activeOption && activeOption !== key) pruneEmptyOptionSteps(activeOption);
     activeOption = key;
+    mountOptionPanelUnder(key);
     const panel = $("#option-panel");
     if (panel) panel.hidden = false;
-    const title = $("#option-panel-title");
-    if (title) title.textContent = OPTION_LABELS[key] || key;
     $$(".option-btn").forEach((b) =>
       b.classList.toggle("is-on", b.dataset.option === key)
     );
@@ -608,8 +676,13 @@
     } else {
       const hint = $("#option-panel-hint");
       if (hint) hint.textContent = OPTION_HINTS[key] || "Ajoute des lignes d’information.";
+      // Première ouverture vide : une ligne prête à remplir
+      if (!(optionsSteps[key] || []).length) {
+        optionsSteps[key] = [{ id: newInstructionId(), label: "", photos: [] }];
+      }
       renderOptionStepsEditor();
     }
+    refreshOptionButtonLabels();
   }
 
   function syncBlocCompte() {
@@ -768,6 +841,7 @@
       optionsSteps.hivernage = normalizeHivernageSteps(client.checklist_hivernage);
     }
     closeOptionPanel();
+    refreshOptionButtonLabels();
     $("#input-password").value = "";
     $("#input-password").placeholder = client.has_password
       ? "Laisser vide pour conserver"
@@ -910,6 +984,7 @@
       { id: newInstructionId(), label: "", photos: [] },
     ];
     renderOptionStepsEditor();
+    refreshOptionButtonLabels();
     const inputs = $$("#option-steps-editor input[type='text']");
     inputs[inputs.length - 1]?.focus();
   });
@@ -1410,7 +1485,12 @@
   });
   $("#input-date-passage")?.addEventListener("change", syncBlocPassage);
   $("#input-date-passage")?.addEventListener("input", syncBlocPassage);
-  $("#chk-creer-compte")?.addEventListener("change", syncBlocCompte);
+  $("#chk-creer-compte")?.addEventListener("change", () => {
+    syncBlocCompte();
+    refreshOptionButtonLabels();
+  });
+  $("#input-email")?.addEventListener("input", refreshOptionButtonLabels);
+  $("#input-telephone")?.addEventListener("input", refreshOptionButtonLabels);
   $("#btn-gen-password")?.addEventListener("click", () => {
     $("#input-password").value = genererPasswordLocal();
   });

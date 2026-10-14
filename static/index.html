@@ -330,18 +330,27 @@
         <!-- Options : visibles seulement en modification -->
         <div id="bloc-edit-options" class="bloc-edit-options" hidden>
           <p class="field-label">Options du client</p>
-          <p class="muted">Ouvre une section, puis ajoute tes lignes d’info et photos.</p>
+          <p class="muted">Appuie sur une option pour ajouter des lignes et des photos juste en dessous.</p>
           <div class="option-stack" id="option-grid" role="tablist">
-            <button type="button" class="option-btn" data-option="ouverture">Créer une ouverture</button>
-            <button type="button" class="option-btn" data-option="local_technique">Créer un local technique</button>
-            <button type="button" class="option-btn" data-option="hivernage">Créer un hivernage</button>
-            <button type="button" class="option-btn" data-option="entretien">Créer un entretien</button>
-            <button type="button" class="option-btn" data-option="compte">Compte client</button>
+            <div class="option-item" data-option-item="ouverture">
+              <button type="button" class="option-btn" data-option="ouverture">Créer une ouverture</button>
+            </div>
+            <div class="option-item" data-option-item="local_technique">
+              <button type="button" class="option-btn" data-option="local_technique">Créer un local technique</button>
+            </div>
+            <div class="option-item" data-option-item="hivernage">
+              <button type="button" class="option-btn" data-option="hivernage">Créer un hivernage</button>
+            </div>
+            <div class="option-item" data-option-item="entretien">
+              <button type="button" class="option-btn" data-option="entretien">Créer un entretien</button>
+            </div>
+            <div class="option-item" data-option-item="compte">
+              <button type="button" class="option-btn" data-option="compte">Créer un compte client</button>
+            </div>
           </div>
 
           <div id="option-panel" class="option-panel" hidden>
             <div class="option-panel-head">
-              <h3 class="option-panel-title" id="option-panel-title">—</h3>
               <button type="button" class="btn btn--ghost btn--sm" id="btn-close-option">Fermer</button>
             </div>
 
