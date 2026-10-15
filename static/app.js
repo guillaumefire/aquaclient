@@ -1177,16 +1177,18 @@
     try {
       const data = await api("/api/dashboard");
       if (summary) {
+        const enCours = data.hivernages_en_cours || 0;
         summary.innerHTML =
           `<div class="dash-stat"><strong>${data.total_clients}</strong><span>Clients</span></div>` +
           `<div class="dash-stat dash-stat--warn"><strong>${data.factures_impayees_total}</strong><span>Factures à payer</span></div>` +
           `<div class="dash-stat dash-stat--ok"><strong>${data.piscines_hivernees}</strong><span>Hivernées</span></div>` +
-          `<div class="dash-stat"><strong>${data.total_clients - data.piscines_hivernees}</strong><span>En eau</span></div>`;
+          `<div class="dash-stat"><strong>${enCours}</strong><span>En hivernage</span></div>`;
       }
       let rows = data.clients || [];
       if (dashFiltre === "impayes") rows = rows.filter((c) => c.a_impaye);
       else if (dashFiltre === "hivernees") rows = rows.filter((c) => c.piscine_hivernee);
-      else if (dashFiltre === "actives") rows = rows.filter((c) => !c.piscine_hivernee);
+      else if (dashFiltre === "actives")
+        rows = rows.filter((c) => !c.piscine_hivernee && !c.hivernage_en_cours);
 
       if (status) {
         status.textContent = rows.length
@@ -1208,6 +1210,8 @@
         }
         if (c.piscine_hivernee) {
           flags.push(`<span class="dash-flag dash-flag--ice">Hivernée</span>`);
+        } else if (c.hivernage_en_cours) {
+          flags.push(`<span class="dash-flag dash-flag--ice">En hivernage</span>`);
         } else {
           flags.push(`<span class="dash-flag">En eau</span>`);
         }
@@ -1653,23 +1657,63 @@
     return required.every((i) => i.done);
   }
 
+  function isHivernageVisite(visite) {
+    return (visite?.type || "") === "hivernage";
+  }
+
+  function hivernagePausable(visite) {
+    return (
+      isHivernageVisite(visite) &&
+      !!visite?.debut &&
+      !!visite?.fin &&
+      !checklistComplete(visite?.checklist || [])
+    );
+  }
+
   function updateFinButton(visite) {
     const btn = $("#btn-fin");
+    const btnDebut = $("#btn-debut");
     const hint = $("#fin-hint");
     if (!btn) return;
-    const started = !!(visite?.debut && !visite?.fin);
-    const finished = !!(visite?.debut && visite?.fin);
+    const isHiv = isHivernageVisite(visite);
     const ok = checklistComplete(visite?.checklist || []);
-    btn.disabled = finished || !started || !ok;
+    const running = !!(visite?.debut && !visite?.fin);
+    const paused = hivernagePausable(visite);
+    const done = !!(visite?.debut && visite?.fin && (!isHiv || ok));
+
+    // Hivernage : on peut terminer même sans tout cocher (pause)
+    btn.disabled = !running || (!isHiv && !ok);
+    btn.textContent = isHiv && !ok ? "Terminer (pause)" : "Terminer";
+
+    if (btnDebut) {
+      btnDebut.disabled = running || done;
+      btnDebut.textContent = paused ? "Reprendre" : "Début";
+    }
+
     if (hint) {
-      if (finished) {
-        hint.textContent = "Prestation terminée.";
+      if (done) {
+        hint.textContent = isHiv
+          ? "Hivernage terminé — 1 facture Hivernage ajoutée."
+          : "Prestation terminée.";
         hint.hidden = false;
-      } else if (!started) {
+      } else if (paused) {
+        hint.textContent = `Hivernage en cours — temps cumulé ${formatDuree(
+          visite.duree_minutes
+        )}. Appuyez sur Reprendre.`;
+        hint.hidden = false;
+      } else if (!visite?.debut) {
         hint.textContent = "Appuyez sur Début pour démarrer la prestation.";
+        hint.hidden = false;
+      } else if (isHiv && !ok) {
+        hint.textContent =
+          "Vous pouvez terminer sans tout cocher : la piscine restera « en hivernage ».";
         hint.hidden = false;
       } else if (!ok) {
         hint.textContent = "Cochez toutes les étapes obligatoires pour terminer.";
+        hint.hidden = false;
+      } else if (isHiv) {
+        hint.textContent =
+          "Tout est coché — Terminer clôture l’hivernage et ajoute 1 facture.";
         hint.hidden = false;
       } else {
         hint.textContent = "";
@@ -1775,26 +1819,32 @@
 
   function renderChrono(visite) {
     const el = $("#chrono-status");
-    const btnDebut = $("#btn-debut");
     if (!visite?.debut) {
       el.textContent = "Pas encore démarré";
       el.classList.remove("is-running", "is-done");
-      if (btnDebut) btnDebut.disabled = false;
       updateFinButton(visite);
       return;
     }
     if (visite.debut && !visite.fin) {
-      el.textContent = `En cours depuis ${visite.debut}`;
+      const cumule = visite.duree_minutes
+        ? ` · déjà ${formatDuree(visite.duree_minutes)}`
+        : "";
+      el.textContent = `En cours depuis ${visite.debut}${cumule}`;
       el.classList.add("is-running");
       el.classList.remove("is-done");
-      if (btnDebut) btnDebut.disabled = true;
+      updateFinButton(visite);
+      return;
+    }
+    if (hivernagePausable(visite)) {
+      el.textContent = `En pause — temps cumulé ${formatDuree(visite.duree_minutes)}`;
+      el.classList.remove("is-running");
+      el.classList.add("is-done");
       updateFinButton(visite);
       return;
     }
     el.textContent = `Durée : ${formatDuree(visite.duree_minutes)} (${visite.debut} → ${visite.fin})`;
     el.classList.add("is-done");
     el.classList.remove("is-running");
-    if (btnDebut) btnDebut.disabled = true;
     updateFinButton(visite);
   }
 
@@ -1839,16 +1889,25 @@
   }
 
   $("#btn-debut").addEventListener("click", () => {
-    if (!visiteActive || visiteActive.debut) return;
+    if (!visiteActive) return;
+    const canResume = hivernagePausable(visiteActive);
+    if (visiteActive.debut && !visiteActive.fin) return;
+    if (visiteActive.debut && visiteActive.fin && !canResume) return;
     const btn = $("#btn-debut");
     if (btn?.dataset.busy === "1") return;
     if (btn) btn.dataset.busy = "1";
     const prevDebut = visiteActive.debut;
+    const prevFin = visiteActive.fin;
+    const prevDuree = visiteActive.duree_minutes;
     visiteActive.debut = nowLocalStamp();
     visiteActive.fin = null;
-    visiteActive.duree_minutes = null;
+    if (!canResume) visiteActive.duree_minutes = null;
     renderChrono(visiteActive);
-    setFeedback($("#check-feedback"), "Prestation démarrée.", true);
+    setFeedback(
+      $("#check-feedback"),
+      canResume ? "Hivernage repris." : "Prestation démarrée.",
+      true
+    );
     api(`/api/visites/${visiteActive.id}/debut`, { method: "POST", body: "{}" })
       .then((res) => {
         visiteActive = {
@@ -1861,6 +1920,8 @@
       })
       .catch((err) => {
         visiteActive.debut = prevDebut;
+        visiteActive.fin = prevFin;
+        visiteActive.duree_minutes = prevDuree;
         renderChrono(visiteActive);
         setFeedback($("#check-feedback"), err.message, false);
       })
@@ -1872,7 +1933,9 @@
   $("#btn-fin").addEventListener("click", () => {
     if (!visiteActive) return;
     if (!visiteActive.debut || visiteActive.fin) return;
-    if (!checklistComplete(visiteActive.checklist || [])) {
+    const isHiv = isHivernageVisite(visiteActive);
+    const ok = checklistComplete(visiteActive.checklist || []);
+    if (!isHiv && !ok) {
       setFeedback(
         $("#check-feedback"),
         "Impossible de terminer : cochez toutes les étapes obligatoires.",
@@ -1888,7 +1951,11 @@
     const prevDuree = visiteActive.duree_minutes;
     visiteActive.fin = nowLocalStamp();
     renderChrono(visiteActive);
-    setFeedback($("#check-feedback"), "Prestation terminée.", true);
+    setFeedback(
+      $("#check-feedback"),
+      isHiv && !ok ? "Hivernage mis en pause…" : "Prestation terminée.",
+      true
+    );
     api(`/api/visites/${visiteActive.id}/fin`, { method: "POST", body: "{}" })
       .then((res) => {
         visiteActive = {
@@ -1897,12 +1964,29 @@
           client: visiteActive.client,
           checklist: visiteActive.checklist,
         };
+        if (visiteActive.client) {
+          if (res.hivernage_complete) {
+            visiteActive.client.piscine_hivernee = true;
+            visiteActive.client.hivernage_en_cours = false;
+          } else if (res.hivernage_en_cours) {
+            visiteActive.client.piscine_hivernee = false;
+            visiteActive.client.hivernage_en_cours = true;
+          }
+        }
+        if (clientActif && visiteActive.client_id === clientActif.id) {
+          clientActif = { ...clientActif, ...visiteActive.client };
+        }
         renderChrono(visiteActive);
-        setFeedback(
-          $("#check-feedback"),
-          `Prestation terminée — ${formatDuree(res.duree_minutes)}.`,
-          true
-        );
+        let msg = `Temps cumulé : ${formatDuree(res.duree_minutes)}.`;
+        if (isHiv && res.hivernage_complete) {
+          msg = `Hivernage terminé — ${msg}`;
+          if (res.facture_hivernage) msg += " Facture 1× Hivernage ajoutée.";
+        } else if (isHiv && res.hivernage_en_cours) {
+          msg = `Piscine en hivernage (pause) — ${msg} Reprenez quand vous voulez.`;
+        } else {
+          msg = `Prestation terminée — ${msg}`;
+        }
+        setFeedback($("#check-feedback"), msg, true);
       })
       .catch((err) => {
         visiteActive.fin = prevFin;
@@ -2584,15 +2668,38 @@
   }
 
   $$(".chip").forEach((chip) => {
-    chip.addEventListener("click", async () => {
+    chip.addEventListener("click", () => {
       const name = chip.dataset.intent;
-      if (intentForce === name && voicePhase === "capture" && !holdRecording) {
-        backToWakeOrIdle();
-        scheduleSpeechRestart();
+      if (intentForce === name) {
+        setIntent(null);
+        setFeedback($("#ia-feedback"), "Type annulé.", null);
         return;
       }
-      await demarrerEnregistrementPour(name);
+      setIntent(name);
+      const ta = $("#ia-texte");
+      if (ta) {
+        ta.focus({ preventScroll: false });
+        // iOS / Android : focus synchrone dans le geste utilisateur ouvre le clavier
+        try {
+          ta.click();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      const labels = { note: "Note", fourniture: "Fourniture", analyse: "Analyse" };
+      setFeedback(
+        $("#ia-feedback"),
+        `${labels[name] || name} : écrivez puis Envoyer, ou maintenez pour parler.`,
+        null
+      );
     });
+  });
+
+  $("#ia-texte")?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      envoyerCommande($("#ia-texte").value);
+    }
   });
 
   $("#btn-ecoute")?.addEventListener("click", async () => {

@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.7.4"
+APP_VERSION = "1.7.5"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -64,7 +64,7 @@ CLIENT_FIELDS = [
     "pompe", "filtre", "robot", "skimmer", "vanne_vidange", "injecteurs", "autres",
     "type_entretien", "frequence_passage", "date_debut_passage",
     "identifiant", "email", "telephone", "password_hash", "compte_actif", "auth_uid",
-    "checklist_hivernage", "piscine_hivernee", "options_checklists",
+    "checklist_hivernage", "piscine_hivernee", "hivernage_en_cours", "options_checklists",
 ]
 
 OPTION_CHECKLIST_KEYS = ("ouverture", "local_technique", "hivernage", "entretien")
@@ -1109,6 +1109,7 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         ),
         "checklist_hivernage": parse_checklist_hivernage(r.get("checklist_hivernage")),
         "piscine_hivernee": from_bool_csv(r.get("piscine_hivernee", "")),
+        "hivernage_en_cours": from_bool_csv(r.get("hivernage_en_cours", "")),
         "options_checklists": parse_options_checklists(
             r.get("options_checklists"),
             fallback_hivernage=r.get("checklist_hivernage"),
@@ -1991,6 +1992,7 @@ async def create_client(body: NouveauClient):
         "auth_uid": auth_uid,
         **_options_fields_from_body(body),
         "piscine_hivernee": bool_csv(bool(body.piscine_hivernee)),
+        "hivernage_en_cours": "0",
     }
     rows.append(row)
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
@@ -2114,6 +2116,11 @@ async def update_client(client_id: int, body: ModifierClient):
             bool(body.piscine_hivernee)
             if body.piscine_hivernee is not None
             else from_bool_csv(target.get("piscine_hivernee", ""))
+        ),
+        "hivernage_en_cours": (
+            "0"
+            if body.piscine_hivernee is True
+            else target.get("hivernage_en_cours", "0")
         ),
     })
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
@@ -2332,6 +2339,103 @@ def get_client(client_id: int):
     raise HTTPException(status_code=404, detail="Client introuvable")
 
 
+def _checklist_is_complete(checklist: list[Any] | None) -> bool:
+    items = checklist or []
+    required = [i for i in items if isinstance(i, dict) and not i.get("optional")]
+    pool = required if required else [i for i in items if isinstance(i, dict)]
+    if not pool:
+        return True  # aucune étape → considéré terminé
+    return all(bool(i.get("done")) for i in pool)
+
+
+def _visite_duree_prev(r: dict[str, str]) -> float:
+    try:
+        return float(str(r.get("duree_minutes") or "").strip() or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _find_resumable_hivernage(client_id: int) -> dict[str, str] | None:
+    """Dernière visite hivernage non terminée (checklist incomplète)."""
+    best: dict[str, str] | None = None
+    best_id = -1
+    for r in read_csv(VISITES_CSV):
+        try:
+            if int(r.get("client_id") or 0) != int(client_id):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if (r.get("type") or "") != "hivernage":
+            continue
+        try:
+            checklist = json.loads(r.get("checklist_json") or "[]")
+        except json.JSONDecodeError:
+            checklist = []
+        if _checklist_is_complete(checklist):
+            continue
+        try:
+            vid = int(r.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if vid > best_id:
+            best_id = vid
+            best = r
+    return best
+
+
+def _set_client_hivernage_statut(client_id: int, *, hivernee: bool, en_cours: bool) -> None:
+    try:
+        if supabase_db.enabled():
+            crow = supabase_db.read_row("clients", client_id, CLIENT_FIELDS)
+            if crow:
+                crow["piscine_hivernee"] = bool_csv(hivernee)
+                crow["hivernage_en_cours"] = bool_csv(en_cours)
+                write_one_row(CLIENTS_CSV, CLIENT_FIELDS, crow)
+            return
+        clients = read_csv(CLIENTS_CSV)
+        for c in clients:
+            if int(c["id"]) == client_id:
+                c["piscine_hivernee"] = bool_csv(hivernee)
+                c["hivernage_en_cours"] = bool_csv(en_cours)
+                write_csv(CLIENTS_CSV, CLIENT_FIELDS, clients)
+                break
+    except Exception:
+        logging.getLogger("aquaclient").exception(
+            "Maj statut hivernage client %s", client_id
+        )
+
+
+def _ensure_facture_hivernage(client_id: int, visite_id: int) -> dict[str, str] | None:
+    """Ajoute 1× Hivernage en facture (idempotent via date_ref=v{visite_id})."""
+    marker = f"v{visite_id}"
+    rows = read_csv(FOURNITURES_CSV)
+    for r in rows:
+        try:
+            if int(r.get("client_id") or 0) != int(client_id):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if (r.get("date_ref") or "").strip() == marker:
+            return r
+        desc = (r.get("description") or "").strip().lower()
+        if desc == "hivernage" and (r.get("date_ref") or "").strip() == marker:
+            return r
+    fid = next_id(rows)
+    row = {
+        "id": fid,
+        "client_id": client_id,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "date_ref": marker,
+        "description": "Hivernage",
+        "quantite": "1",
+        "envoyee": "non",
+        "payee": "non",
+    }
+    rows.append(row)
+    write_csv(FOURNITURES_CSV, FOURNITURE_FIELDS, rows)
+    return row
+
+
 @app.post("/api/visites")
 def create_visite(body: VisiteCreate):
     if body.type not in {"depannage", "entretien_simple", "entretien_complet", "hivernage"}:
@@ -2343,6 +2447,13 @@ def create_visite(body: VisiteCreate):
             break
     if not client:
         raise HTTPException(status_code=404, detail="Client introuvable")
+
+    # Reprise d'un hivernage déjà commencé (checklist incomplète)
+    if body.type == "hivernage":
+        existing = _find_resumable_hivernage(body.client_id)
+        if existing:
+            return _visite_payload(existing, client)
+
     checklist = build_checklist(client, body.type)
     rows = read_csv(VISITES_CSV)
     vid = next_id(rows)
@@ -2422,9 +2533,20 @@ def debut_prestation(visite_id: int):
         raise HTTPException(status_code=404, detail="Visite introuvable")
     if r.get("debut") and not r.get("fin"):
         return _visite_payload(r, include_client=False, include_photos=False)
+
+    is_hiv = (r.get("type") or "") == "hivernage"
+    try:
+        checklist = json.loads(r.get("checklist_json") or "[]")
+    except json.JSONDecodeError:
+        checklist = []
+    resume_hiv = bool(is_hiv and r.get("fin") and not _checklist_is_complete(checklist))
+
     r["debut"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     r["fin"] = ""
-    r["duree_minutes"] = ""
+    if not resume_hiv:
+        # Nouvelle session (hors reprise hivernage) : reset du chrono
+        r["duree_minutes"] = ""
+    # Reprise : on conserve duree_minutes déjà accumulée
     write_one_row(VISITES_CSV, VISITE_FIELDS, r)
     return _visite_payload(r, include_client=False, include_photos=False)
 
@@ -2438,42 +2560,52 @@ def fin_prestation(visite_id: int):
         raise HTTPException(status_code=400, detail="Appuyez d'abord sur Début de prestation.")
     if r.get("fin"):
         return _visite_payload(r, include_client=False, include_photos=False)
-    checklist = json.loads(r.get("checklist_json") or "[]")
-    required = [i for i in checklist if not i.get("optional")]
-    incomplete = [i for i in (required or checklist) if not i.get("done")]
-    if incomplete:
+
+    try:
+        checklist = json.loads(r.get("checklist_json") or "[]")
+    except json.JSONDecodeError:
+        checklist = []
+    is_hiv = (r.get("type") or "") == "hivernage"
+    complete = _checklist_is_complete(checklist)
+
+    # Hors hivernage : toutes les étapes obligatoires requises
+    if not is_hiv and not complete:
         raise HTTPException(
             status_code=400,
             detail="Cochez toutes les étapes obligatoires avant de terminer.",
         )
+
     fin = datetime.now()
-    r["fin"] = fin.strftime("%Y-%m-%d %H:%M:%S")
     try:
         debut = datetime.strptime(r["debut"], "%Y-%m-%d %H:%M:%S")
     except ValueError:
         debut = datetime.strptime(r["debut"][:16], "%Y-%m-%d %H:%M")
-    minutes = round((fin - debut).total_seconds() / 60, 1)
-    r["duree_minutes"] = str(minutes)
+    session_min = round((fin - debut).total_seconds() / 60, 1)
+    total_min = round(_visite_duree_prev(r) + session_min, 1)
+    r["fin"] = fin.strftime("%Y-%m-%d %H:%M:%S")
+    r["duree_minutes"] = str(total_min)
     write_one_row(VISITES_CSV, VISITE_FIELDS, r)
-    # Fin d'hivernage → marque la piscine comme hivernée
-    if (r.get("type") or "") == "hivernage":
-        try:
-            cid = int(r["client_id"])
-            if supabase_db.enabled():
-                crow = supabase_db.read_row("clients", cid, CLIENT_FIELDS)
-                if crow:
-                    crow["piscine_hivernee"] = "1"
-                    write_one_row(CLIENTS_CSV, CLIENT_FIELDS, crow)
-            else:
-                clients = read_csv(CLIENTS_CSV)
-                for c in clients:
-                    if int(c["id"]) == cid:
-                        c["piscine_hivernee"] = "1"
-                        write_csv(CLIENTS_CSV, CLIENT_FIELDS, clients)
-                        break
-        except Exception:
-            pass
-    return _visite_payload(r, include_client=False, include_photos=False)
+
+    facture = None
+    if is_hiv:
+        cid = int(r["client_id"])
+        if complete:
+            _set_client_hivernage_statut(cid, hivernee=True, en_cours=False)
+            facture = _ensure_facture_hivernage(cid, int(r["id"]))
+        else:
+            _set_client_hivernage_statut(cid, hivernee=False, en_cours=True)
+
+    payload = _visite_payload(r, include_client=False, include_photos=False)
+    if is_hiv:
+        payload["hivernage_complete"] = complete
+        payload["hivernage_en_cours"] = not complete
+        if facture:
+            payload["facture_hivernage"] = {
+                "id": int(facture["id"]),
+                "description": facture.get("description") or "Hivernage",
+                "quantite": facture.get("quantite") or "1",
+            }
+    return payload
 
 
 @app.patch("/api/visites/{visite_id}/checklist")
@@ -2703,6 +2835,12 @@ def dashboard_overview():
         if date and (cid not in last_visite_by or date > last_visite_by[cid]):
             last_visite_by[cid] = date
         if (v.get("type") or "") == "hivernage" and (v.get("fin") or "").strip():
+            try:
+                cl = json.loads(v.get("checklist_json") or "[]")
+            except json.JSONDecodeError:
+                cl = []
+            if not _checklist_is_complete(cl):
+                continue
             fin = (v.get("fin") or date)[:16]
             if fin and (cid not in last_hiv_by or fin > last_hiv_by[cid]):
                 last_hiv_by[cid] = fin
@@ -2719,6 +2857,7 @@ def dashboard_overview():
             "label": f'{c["prenom"]} {c["nom"]}'.strip(),
             "adresse": c["adresse"],
             "piscine_hivernee": bool(c.get("piscine_hivernee")),
+            "hivernage_en_cours": bool(c.get("hivernage_en_cours")),
             "factures_impayees": unpaid,
             "a_impaye": unpaid > 0,
             "derniere_visite": last_visite_by.get(cid) or None,
@@ -2729,10 +2868,12 @@ def dashboard_overview():
 
     rows.sort(key=lambda x: (x["nom"] or "").lower())
     hivernees = sum(1 for x in rows if x["piscine_hivernee"])
+    en_cours = sum(1 for x in rows if x["hivernage_en_cours"] and not x["piscine_hivernee"])
     avec_impayes = sum(1 for x in rows if x["a_impaye"])
     return {
         "total_clients": len(rows),
         "piscines_hivernees": hivernees,
+        "hivernages_en_cours": en_cours,
         "clients_impayes": avec_impayes,
         "factures_impayees_total": sum(unpaid_by.values()),
         "clients": rows,
@@ -2750,6 +2891,8 @@ def patch_hivernage_statut(client_id: int, body: HivernageStatutUpdate):
     for r in rows:
         if int(r["id"]) == client_id:
             r["piscine_hivernee"] = bool_csv(body.piscine_hivernee)
+            if body.piscine_hivernee:
+                r["hivernage_en_cours"] = "0"
             write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
             return row_client(r)
     raise HTTPException(status_code=404, detail="Client introuvable")

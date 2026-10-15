@@ -532,6 +532,13 @@ def init_supabase(
             "alter table public.clients add column if not exists piscine_hivernee text default '0';"
         )
     try:
+        get_client().table("clients").select("hivernage_en_cours").limit(1).execute()
+    except Exception:
+        logger.info("Colonne hivernage_en_cours absente → ajout…")
+        _ensure_column_via_db(
+            "alter table public.clients add column if not exists hivernage_en_cours text default '0';"
+        )
+    try:
         get_client().table("clients").select("options_checklists").limit(1).execute()
     except Exception:
         logger.info("Colonne options_checklists absente → ajout…")

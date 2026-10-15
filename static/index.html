@@ -222,9 +222,9 @@
       <button type="button" class="btn btn--primary btn--block" id="btn-debut">Début</button>
       <ul class="checklist" id="checklist"></ul>
       <button type="button" class="btn btn--ghost btn--block" id="btn-fin" disabled>
-        Fin
+        Terminer
       </button>
-      <p class="muted" id="fin-hint">Cochez toutes les étapes obligatoires pour terminer.</p>
+      <p class="muted" id="fin-hint">Appuyez sur Début pour démarrer la prestation.</p>
       <p class="ia-feedback" id="check-feedback" role="status"></p>
 
       <div class="ia-panel">
@@ -260,10 +260,10 @@
           <div class="vu-bar" id="vu-bar"></div>
         </div>
         <label class="field">
-          <span>Dernière commande</span>
-          <textarea id="ia-texte" rows="2" placeholder="ex. note la piscine est descendue 25 cm" readonly></textarea>
+          <span>Écrire à la main</span>
+          <textarea id="ia-texte" rows="2" placeholder="ex. note la piscine est descendue 25 cm" inputmode="text" autocomplete="off"></textarea>
         </label>
-        <button type="button" class="btn btn--primary btn--block" id="btn-envoyer-ia" hidden>Envoyer</button>
+        <button type="button" class="btn btn--primary btn--block" id="btn-envoyer-ia">Envoyer</button>
         <p class="ia-feedback" id="ia-feedback" role="status"></p>
       </div>
 
