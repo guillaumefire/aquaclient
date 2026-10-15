@@ -1868,18 +1868,14 @@
     setIntent(null);
     // Historique en arrière-plan
     refreshHistorique(c.id).catch(() => {});
-    // Téléphone : le Web Speech est peu fiable → privilégier « Maintenir pour parler »
-    if (isMobileVocal()) {
-      stopWakeListen();
-      setFeedback(
-        $("#ia-feedback"),
-        "Sur téléphone : choisissez Note / Fourniture / Analyse puis maintenez le bouton pour parler.",
-        null
-      );
-      ensureSharedMic().catch(() => {});
-    } else {
-      startWakeListen().catch(() => {});
-    }
+    // Pas d’écoute/enregistrement continue à l’ouverture
+    stopWakeListen();
+    releaseSharedMic();
+    setFeedback(
+      $("#ia-feedback"),
+      "Appuyez sur Enregistrer pour parler (note / fourniture / analyse). L’écoute continue est OFF.",
+      null
+    );
   }
 
   function nowLocalStamp() {
@@ -2162,10 +2158,24 @@
     if (!btn) return;
     if (wantWakeListen) {
       btn.setAttribute("aria-pressed", "true");
-      btn.textContent = "Écoute auto · ON";
+      btn.textContent = "Écoute mots-clés · ON";
     } else {
       btn.setAttribute("aria-pressed", "false");
-      btn.textContent = "Écoute auto · OFF";
+      btn.textContent = "Écoute mots-clés · OFF";
+    }
+  }
+
+  function updateRecordButton() {
+    const btn = $("#btn-parler");
+    if (!btn) return;
+    if (holdRecording) {
+      btn.classList.add("is-recording");
+      btn.textContent = "Arrêter l’enregistrement";
+      btn.setAttribute("aria-pressed", "true");
+    } else {
+      btn.classList.remove("is-recording");
+      btn.textContent = "Enregistrer";
+      btn.setAttribute("aria-pressed", "false");
     }
   }
 
@@ -2195,9 +2205,9 @@
       else if (state === "capture" || state === "speaking") {
         sub.textContent = "Suite… (ou dites « fin »)";
       } else if (state === "listening") {
-        sub.textContent = "J’écoute les mots-clés : note / fourniture / analyse";
+        sub.textContent = "Mots-clés seuls (pas d’enregistrement) : note / fourniture / analyse";
       } else {
-        sub.textContent = "Dites « note… », « fourniture… » ou « analyse… »";
+        sub.textContent = "Appuyez sur Enregistrer, ou activez l’écoute des mots-clés";
       }
     }
   }
@@ -2220,18 +2230,30 @@
     setIntent(intent);
     voicePhase = "capture";
     setListenStatus("capture");
+    stopSpeechRec({ keepWanted: true });
     setFeedback(
       $("#ia-feedback"),
-      `Mot-clé « ${intent} » — dictez la suite, puis silence ou « fin ».`,
+      `« ${intent} » détecté — enregistrement démarré. Appuyez sur Arrêter quand c’est fini.`,
       null
     );
+    // Démarre un vrai enregistrement audio (pas l’écoute continue)
+    if (!holdRecording && !processingVocal) {
+      startHoldRecord({ fromWake: true, intent });
+    }
+    // Sécurité : coupe l’enregistrement si oublié
     captureTimer = setTimeout(() => {
-      if (voicePhase === "capture") {
-        setFeedback($("#ia-feedback"), "Temps écoulé — redis « note / fourniture / analyse ».", false);
+      if (holdRecording) {
+        stopHoldRecord();
+      } else if (voicePhase === "capture") {
+        setFeedback(
+          $("#ia-feedback"),
+          "Temps écoulé — appuyez sur Enregistrer ou redites note / fourniture / analyse.",
+          false
+        );
         backToWakeOrIdle();
         scheduleSpeechRestart();
       }
-    }, CAPTURE_TIMEOUT_MS);
+    }, Math.max(CAPTURE_TIMEOUT_MS, 20000));
   }
 
   async function traiterTexteVocal(texteBrut, { fromHold = false } = {}) {
@@ -2274,10 +2296,9 @@
       return;
     }
 
-    // Juste le mot-clé → ouvrir une fenêtre de capture (une seule fois)
+    // Juste le mot-clé → démarre l’enregistrement audio (pas l’écoute continue)
     if (isMostlyWakeWord(texte)) {
       enterCapture(intent);
-      scheduleSpeechRestart();
       return;
     }
 
@@ -2356,8 +2377,8 @@
     const rec = new SR();
     speechRec = rec;
     rec.lang = "fr-FR";
-    // Mobile : sessions courtes + interim pour attraper les mots-clés plus tôt
-    rec.continuous = !mobile;
+    // Jamais en continue : sessions courtes, uniquement pour détecter les mots-clés
+    rec.continuous = false;
     rec.interimResults = true;
     rec.maxAlternatives = 3;
 
@@ -2394,6 +2415,11 @@
         interimWakeArmed = true;
         const w = detectWakeIntent(interimTxt);
         if (w && isMostlyWakeWord(interimTxt)) {
+          try {
+            rec.abort();
+          } catch {
+            /* */
+          }
           enterCapture(w);
           return;
         }
@@ -2484,15 +2510,15 @@
       setFeedback(
         $("#ia-feedback"),
         isMobileVocal()
-          ? "Sur ce téléphone, utilisez « Maintenir pour parler »."
-          : "Écoute auto indisponible — utilisez Chrome/Edge ou « Maintenir pour parler ».",
+          ? "Écoute mots-clés indisponible ici — utilisez le bouton Enregistrer."
+          : "Écoute mots-clés indisponible — utilisez Chrome/Edge ou le bouton Enregistrer.",
         false
       );
     } else {
       setListenStatus("listening");
       setFeedback(
         $("#ia-feedback"),
-        "Écoute des mots-clés seule — rien n’est enregistré tant que vous ne dites pas note / fourniture / analyse.",
+        "Écoute mots-clés ON : dès que vous dites note / fourniture / analyse, l’enregistrement démarre. Sinon rien n’est enregistré.",
         true
       );
     }
@@ -2528,9 +2554,9 @@
     }
   }
 
-  async function startHoldRecord() {
+  async function startHoldRecord({ fromWake = false, intent = null } = {}) {
     if (holdRecording || processingVocal) return;
-    // Couper l’écoute auto pendant le maintien (évite la double capture / boucle)
+    // Couper l’écoute mots-clés pendant l’enregistrement (évite la double capture)
     stopSpeechRec({ keepWanted: true });
     try {
       holdStream = await ensureSharedMic();
@@ -2542,27 +2568,26 @@
       holdRecorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) holdChunks.push(e.data);
       };
-      // timeslice plus court = premier chunk plus vite sur Android
       holdRecorder.start(isMobileVocal() ? 120 : 250);
       holdRecording = true;
       holdStartedAt = Date.now();
-      if (intentForce || armedIntent) {
-        armedIntent = intentForce || armedIntent;
-        voicePhase = "capture";
-      } else {
-        voicePhase = "capture";
+      const forced = intent || intentForce || armedIntent;
+      if (forced) {
+        armedIntent = forced;
+        setIntent(forced);
       }
+      voicePhase = "capture";
       setListenStatus("capture");
-      const hint = armedIntent || intentForce
-        ? `Parlez la ${armedIntent || intentForce}… relâchez pour envoyer.`
-        : "Parlez (note / fourniture / analyse)… relâchez pour envoyer.";
+      updateRecordButton();
+      const hint = forced
+        ? `Enregistrement ${forced}… parlez puis appuyez sur Arrêter.`
+        : fromWake
+          ? "Enregistrement… dites la suite, puis Arrêter."
+          : "Enregistrement… dites note / fourniture / analyse puis Arrêter.";
       setFeedback($("#ia-feedback"), hint, null);
-      const btn = $("#btn-parler");
-      if (btn) {
-        btn.classList.add("is-recording");
-        btn.textContent = "Parlez… (relâcher)";
-      }
     } catch (err) {
+      holdRecording = false;
+      updateRecordButton();
       setFeedback($("#ia-feedback"), err.message || "Micro indisponible.", false);
       scheduleSpeechRestart();
     }
@@ -2570,9 +2595,9 @@
 
   async function stopHoldRecord() {
     if (!holdRecording || !holdRecorder) return;
-    // Évite les taps accidentels (< 350 ms)
+    clearCaptureTimer();
     const elapsed = Date.now() - (holdStartedAt || 0);
-    if (elapsed < 350) {
+    if (elapsed < 400) {
       holdRecording = false;
       try {
         holdRecorder.onstop = null;
@@ -2582,23 +2607,16 @@
       }
       holdRecorder = null;
       holdChunks = [];
-      const btn = $("#btn-parler");
-      if (btn) {
-        btn.classList.remove("is-recording");
-        btn.textContent = "Maintenir pour parler";
-      }
-      setFeedback($("#ia-feedback"), "Trop court — maintenez en parlant 2–3 secondes.", false);
+      releaseSharedMic();
+      updateRecordButton();
+      setFeedback($("#ia-feedback"), "Trop court — parlez 1–2 secondes puis Arrêter.", false);
       backToWakeOrIdle();
       scheduleSpeechRestart();
       return;
     }
 
     holdRecording = false;
-    const btn = $("#btn-parler");
-    if (btn) {
-      btn.classList.remove("is-recording");
-      btn.textContent = "Maintenir pour parler";
-    }
+    updateRecordButton();
     setListenStatus("busy");
     setFeedback($("#ia-feedback"), "Transcription…", null);
 
@@ -2616,13 +2634,13 @@
         resolve(chunks.length ? new Blob(chunks, { type: mimeType || "audio/webm" }) : null);
       }
     });
-    // Ne coupe PAS le micro partagé (réutilisé au prochain maintien)
     holdRecorder = null;
     holdChunks = [];
     holdStream = null;
+    releaseSharedMic();
 
     if (!blob || blob.size < 350) {
-      setFeedback($("#ia-feedback"), "Trop court — maintenez plus longtemps.", false);
+      setFeedback($("#ia-feedback"), "Trop court — recommencez l’enregistrement.", false);
       backToWakeOrIdle();
       scheduleSpeechRestart();
       return;
@@ -2648,7 +2666,6 @@
         );
       }
       let texte = data.texte || "";
-      // Si une puce est active, préfixer le mot-clé manquant
       const forced = armedIntent || intentForce;
       if (forced && texte && !detectWakeIntent(texte)) {
         texte = `${forced} ${texte}`;
@@ -2661,10 +2678,13 @@
     }
   }
 
-  async function demarrerEnregistrementPour(intent) {
-    enterCapture(intent);
-    if (!wantWakeListen) await startWakeListen();
-    else if (!speechRec) startSpeechRec();
+  async function toggleRecord() {
+    if (processingVocal) return;
+    if (holdRecording) {
+      await stopHoldRecord();
+    } else {
+      await startHoldRecord();
+    }
   }
 
   $$(".chip").forEach((chip) => {
@@ -2705,7 +2725,7 @@
   $("#btn-ecoute")?.addEventListener("click", async () => {
     if (wantWakeListen) {
       stopWakeListen();
-      setFeedback($("#ia-feedback"), "Écoute auto coupée.", null);
+      setFeedback($("#ia-feedback"), "Écoute mots-clés coupée — seul le bouton Enregistrer capture l’audio.", null);
       return;
     }
     await startWakeListen();
@@ -2775,81 +2795,13 @@
 
   const btnParler = $("#btn-parler");
   if (btnParler) {
-    let holdPointerId = null;
-    let holdFromTouch = false;
-    const down = (e) => {
-      if (e.button != null && e.button !== 0) return;
-      if (holdRecording || holdPointerId != null) return;
+    // Clic = démarrer / arrêter (plus de maintien continu)
+    btnParler.addEventListener("click", (e) => {
       e.preventDefault();
-      holdFromTouch = e.pointerType === "touch" || e.type === "touchstart";
-      holdPointerId = e.pointerId ?? "touch";
-      try {
-        if (e.pointerId != null) btnParler.setPointerCapture(e.pointerId);
-      } catch {
-        /* */
-      }
-      startHoldRecord();
-    };
-    const up = (e) => {
-      if (holdPointerId == null && !holdRecording) return;
-      if (
-        e.pointerId != null &&
-        holdPointerId != null &&
-        holdPointerId !== "touch" &&
-        e.pointerId !== holdPointerId
-      ) {
-        return;
-      }
-      e.preventDefault();
-      holdPointerId = null;
-      holdFromTouch = false;
-      try {
-        if (e.pointerId != null && btnParler.hasPointerCapture?.(e.pointerId)) {
-          btnParler.releasePointerCapture(e.pointerId);
-        }
-      } catch {
-        /* */
-      }
-      stopHoldRecord();
-    };
-    btnParler.addEventListener("pointerdown", down);
-    btnParler.addEventListener("pointerup", up);
-    btnParler.addEventListener("pointercancel", up);
-    btnParler.addEventListener("lostpointercapture", () => {
-      if (holdRecording) {
-        holdPointerId = null;
-        stopHoldRecord();
-      }
+      toggleRecord();
     });
-    // Fallback si pas d’événements pointer (vieux WebViews)
-    if (!window.PointerEvent) {
-      btnParler.addEventListener(
-        "touchstart",
-        (e) => {
-          if (e.touches.length > 1) return;
-          e.preventDefault();
-          down(e);
-        },
-        { passive: false }
-      );
-      btnParler.addEventListener(
-        "touchend",
-        (e) => {
-          e.preventDefault();
-          up(e);
-        },
-        { passive: false }
-      );
-      btnParler.addEventListener(
-        "touchcancel",
-        (e) => {
-          e.preventDefault();
-          up(e);
-        },
-        { passive: false }
-      );
-    }
     btnParler.addEventListener("contextmenu", (e) => e.preventDefault());
+    updateRecordButton();
   }
 
   $("#btn-recaler-gps").addEventListener("click", async () => {
