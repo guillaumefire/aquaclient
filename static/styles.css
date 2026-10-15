@@ -1874,6 +1874,10 @@ body:has(#screen-home.screen--active) .brand-tag {
   gap: 0.45rem;
 }
 
+.option-extra[hidden] {
+  display: none !important;
+}
+
 /* ── Éditeur checklist hivernage + photos ── */
 .hiv-editor {
   display: grid;

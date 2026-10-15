@@ -650,6 +650,7 @@
     $$(".option-btn").forEach((b) => b.classList.remove("is-on"));
     $$(".option-extra").forEach((el) => {
       el.hidden = true;
+      el.style.display = "none";
     });
     const stepsBloc = $("#bloc-option-steps");
     if (stepsBloc) stepsBloc.hidden = false;
@@ -667,12 +668,19 @@
       b.classList.toggle("is-on", b.dataset.option === key)
     );
     const extraCompte = $("#extra-compte");
-    if (extraCompte) extraCompte.hidden = key !== "compte";
+    if (extraCompte) {
+      const showCompte = key === "compte";
+      extraCompte.hidden = !showCompte;
+      // Sécurité : le display:grid CSS ne doit pas réafficher le bloc compte ailleurs
+      extraCompte.style.display = showCompte ? "" : "none";
+    }
     const stepsBloc = $("#bloc-option-steps");
     if (stepsBloc) stepsBloc.hidden = key === "compte";
     if (key === "compte") {
       syncBlocCompte();
     } else {
+      const blocCompte = $("#bloc-compte");
+      if (blocCompte) blocCompte.hidden = true;
       const hint = $("#option-panel-hint");
       if (hint) hint.textContent = OPTION_HINTS[key] || "Ajoute des lignes d’information.";
       // Première ouverture vide : une ligne prête à remplir
@@ -1868,14 +1876,24 @@
     setIntent(null);
     // Historique en arrière-plan
     refreshHistorique(c.id).catch(() => {});
-    // Pas d’écoute/enregistrement continue à l’ouverture
-    stopWakeListen();
     releaseSharedMic();
-    setFeedback(
-      $("#ia-feedback"),
-      "Appuyez sur Enregistrer pour parler (note / fourniture / analyse). L’écoute continue est OFF.",
-      null
-    );
+    $("#ia-texte").value = "";
+    // Écoute permanente des mots-clés dès l’ouverture de la visite
+    startWakeListen()
+      .then(() => {
+        setFeedback(
+          $("#ia-feedback"),
+          "Écoute active — dites « note / fourniture / analyse » + le détail. Rien n’est écrit tant qu’il n’y a pas de commande.",
+          true
+        );
+      })
+      .catch(() => {
+        setFeedback(
+          $("#ia-feedback"),
+          "Micro indisponible — autorisez-le, ou utilisez « Maintenir pour parler ».",
+          false
+        );
+      });
   }
 
   function nowLocalStamp() {
@@ -2001,6 +2019,8 @@
   let armedIntent = null;
   let speechRec = null;
   let speechRestartTimer = null;
+  let speechPhraseBuffer = "";
+  let speechPhraseTimer = null;
   let captureTimer = null;
   let holdStream = null;
   let holdRecorder = null;
@@ -2009,6 +2029,9 @@
   let holdStartedAt = 0;
   let sharedMicStream = null;
   let processingVocal = false;
+  /** Buffer phrase vocale (survit aux redémarrages SpeechRecognition) */
+  let voicePhraseBuffer = "";
+  let voicePhraseTimer = null;
   /** idle | wake | capture | busy */
   let voicePhase = "idle";
   const CAPTURE_TIMEOUT_MS = isMobileVocalSafe() ? 14000 : 8000;
@@ -2081,27 +2104,8 @@
       }
     );
 
-    const nombres = {
-      zero: "0",
-      deux: "2",
-      trois: "3",
-      quatre: "4",
-      cinq: "5",
-      six: "6",
-      sept: "7",
-      huit: "8",
-      neuf: "9",
-      dix: "10",
-    };
-    Object.entries(nombres).forEach(([mot, ch]) => {
-      out = out.replace(new RegExp(`\\b${mot}\\b`, "gi"), ch);
-    });
-    out = out.replace(/\b(un|une)\s+(bidon|sac|cartouche|seau)\b/gi, "1 $2");
-    const intent = detectWakeIntent(out);
-    if (intent === "fourniture" && !/\b(fourniture|facture|facturer)\b/i.test(out)) {
-      out = `fourniture ${out}`;
-    }
-    return out;
+    out = normaliserNombresOraux(out);
+    return out.replace(/\s+/g, " ").trim();
   }
 
   function isMostlyWakeWord(text) {
@@ -2141,6 +2145,14 @@
     }
   }
 
+  function clearVoicePhraseBuffer() {
+    voicePhraseBuffer = "";
+    if (voicePhraseTimer) {
+      clearTimeout(voicePhraseTimer);
+      voicePhraseTimer = null;
+    }
+  }
+
   function backToWakeOrIdle() {
     clearCaptureTimer();
     armedIntent = null;
@@ -2168,13 +2180,14 @@
   function updateRecordButton() {
     const btn = $("#btn-parler");
     if (!btn) return;
+    const mobile = isMobileVocal();
     if (holdRecording) {
       btn.classList.add("is-recording");
-      btn.textContent = "Arrêter l’enregistrement";
+      btn.textContent = mobile ? "Parlez… (relâcher)" : "Arrêter l’enregistrement";
       btn.setAttribute("aria-pressed", "true");
     } else {
       btn.classList.remove("is-recording");
-      btn.textContent = "Enregistrer";
+      btn.textContent = mobile ? "Maintenir pour parler" : "Enregistrer";
       btn.setAttribute("aria-pressed", "false");
     }
   }
@@ -2203,127 +2216,228 @@
     if (sub) {
       if (state === "busy") sub.textContent = "Traitement…";
       else if (state === "capture" || state === "speaking") {
-        sub.textContent = "Suite… (ou dites « fin »)";
+        sub.textContent = "Continuez : donnez le détail…";
       } else if (state === "listening") {
-        sub.textContent = "Mots-clés seuls (pas d’enregistrement) : note / fourniture / analyse";
+        sub.textContent = "J’écoute : note / fourniture / analyse + le détail";
       } else {
-        sub.textContent = "Appuyez sur Enregistrer, ou activez l’écoute des mots-clés";
+        sub.textContent = "Écoute des mots-clés";
       }
     }
   }
 
   function stripWakePrefix(texte, intent) {
     let t = String(texte || "").trim();
+    // Enlever le mot-clé partout en tête (ne doit jamais s’écrire dans la note / fourniture)
     if (intent === "note") {
-      t = t.replace(/^(une\s+)?(note|noter)[:\s,-]*/i, "").trim();
+      t = t.replace(/^(une?\s+)?(notes?|noter)\b[:\s,-]*/i, "").trim();
     } else if (intent === "analyse") {
-      t = t.replace(/^(une\s+)?(analyse|analyser|annalyse|analise)[:\s,-]*/i, "").trim();
+      t = t.replace(/^(une?\s+)?(analyses?|analyser|annalyse|analise|analyce)\b[:\s,-]*/i, "").trim();
     } else if (intent === "fourniture") {
-      t = t.replace(/^(une\s+)?(facture|facturer|fourniture|fournitures)[:\s,-]*/i, "").trim();
+      t = t
+        .replace(
+          /^(une?\s+)?(fournitures?|forniture|furniture|formiture|pourriture|factures?|facturer)\b[:\s,-]*/i,
+          ""
+        )
+        .trim();
     }
-    return t;
+    return t.replace(/^[.,;:\-\s]+/, "").trim();
+  }
+
+  function normaliserNombresOraux(text) {
+    let out = String(text || "");
+    const nombres = {
+      zero: "0",
+      un: "1",
+      une: "1",
+      deux: "2",
+      trois: "3",
+      quatre: "4",
+      cinq: "5",
+      six: "6",
+      sept: "7",
+      huit: "8",
+      neuf: "9",
+      dix: "10",
+      onze: "11",
+      douze: "12",
+      treize: "13",
+      quatorze: "14",
+      quinze: "15",
+      seize: "16",
+      vingt: "20",
+    };
+    // Ne pas transformer « un/une » article hors contexte quantité (fait après pour produits)
+    Object.entries(nombres).forEach(([mot, ch]) => {
+      if (mot === "un" || mot === "une") return;
+      out = out.replace(new RegExp(`\\b${mot}\\b`, "gi"), ch);
+    });
+    // Erreurs Whisper / Chrome : « deux » → « de », « to », « ceux »…
+    out = out.replace(
+      /\b(to|too|two|ceux|d['’]?eux|deuxe?|deu)\s+(bidon|sac|seau|cartouche|litre|paquet|bo[iî]te|kg|chlore|brome)\b/gi,
+      "2 $2"
+    );
+    out = out.replace(
+      /\b(fourniture|facture|facturer)\s+(de|des|du)\s+(bidon|sac|seau|cartouche|litre|paquet|bo[iî]te)\b/gi,
+      "$1 2 $3"
+    );
+    out = out.replace(
+      /^(de|des|du)\s+(bidon|sac|seau|cartouche|litre|paquet|bo[iî]te)\b/i,
+      "2 $2"
+    );
+    out = out.replace(
+      /\b(un|une)\s+(bidon|sac|seau|cartouche|litre|paquet|bo[iî]te|kg)\b/gi,
+      "1 $2"
+    );
+    // « 2bidons » / « x2 » / « 2 x »
+    out = out.replace(/\b(\d+)\s*x\s*(?=\w)/gi, "$1 ");
+    out = out.replace(/\bx\s*(\d+)\b/gi, "$1");
+    out = out.replace(/\b(\d+)(bidon|sac|seau|cartouche|litre|paquet)/gi, "$1 $2");
+    return out;
   }
 
   function enterCapture(intent) {
+    // Mot-clé seul → on continue d’écouter la suite (sans écrire, sans MediaRecorder)
     clearCaptureTimer();
     armedIntent = intent;
     setIntent(intent);
     voicePhase = "capture";
     setListenStatus("capture");
-    stopSpeechRec({ keepWanted: true });
     setFeedback(
       $("#ia-feedback"),
-      `« ${intent} » détecté — enregistrement démarré. Appuyez sur Arrêter quand c’est fini.`,
+      `Mot-clé « ${intent} » — dites maintenant le détail (rien n’est enregistré tant que ce n’est pas complet).`,
       null
     );
-    // Démarre un vrai enregistrement audio (pas l’écoute continue)
-    if (!holdRecording && !processingVocal) {
-      startHoldRecord({ fromWake: true, intent });
-    }
-    // Sécurité : coupe l’enregistrement si oublié
+    if (!speechRec && wantWakeListen) scheduleSpeechRestart();
     captureTimer = setTimeout(() => {
-      if (holdRecording) {
-        stopHoldRecord();
-      } else if (voicePhase === "capture") {
+      if (voicePhase === "capture" && !processingVocal && !holdRecording) {
         setFeedback(
           $("#ia-feedback"),
-          "Temps écoulé — appuyez sur Enregistrer ou redites note / fourniture / analyse.",
+          "Temps écoulé — redites « note / fourniture / analyse » + le détail.",
           false
         );
+        clearVoicePhraseBuffer();
         backToWakeOrIdle();
         scheduleSpeechRestart();
       }
-    }, Math.max(CAPTURE_TIMEOUT_MS, 20000));
+    }, Math.max(CAPTURE_TIMEOUT_MS, 14000));
   }
 
-  async function traiterTexteVocal(texteBrut, { fromHold = false } = {}) {
+  async function traiterTexteVocal(
+    texteBrut,
+    { fromHold = false, keywordAlreadySaid = false } = {}
+  ) {
     const brut = String(texteBrut || "").trim();
-    if (!brut || processingVocal) return;
+    if (!brut || processingVocal) return false;
 
     let texte = normaliserTexteVocal(brut);
 
     if (isStopCommand(texte) || isStopCommand(stripWakePrefix(texte, armedIntent || detectWakeIntent(texte)))) {
+      clearVoicePhraseBuffer();
       terminerEnregistrementVocal();
       scheduleSpeechRestart();
-      return;
+      return false;
     }
 
     texte = stripStopSuffix(texte);
     if (!texte) {
+      clearVoicePhraseBuffer();
       terminerEnregistrementVocal();
       scheduleSpeechRestart();
-      return;
+      return false;
     }
 
     const wake = detectWakeIntent(texte);
-    const intent = wake || armedIntent || intentForce;
+
+    // Vocal : on n’enregistre QUE si un mot-clé a été dit (dans cette prise ou juste avant)
+    if (fromHold && !wake && !keywordAlreadySaid) {
+      setFeedback(
+        $("#ia-feedback"),
+        `Aucun mot-clé dit — rien n’a été enregistré. Dites « note… », « fourniture… » ou « analyse… ».`,
+        false
+      );
+      clearVoicePhraseBuffer();
+      backToWakeOrIdle();
+      scheduleSpeechRestart();
+      return false;
+    }
+
+    const intent = wake || (keywordAlreadySaid ? armedIntent : null) || (!fromHold ? intentForce : null);
 
     // Écoute wake : ignorer tout ce qui n’est PAS un mot-clé (pas d’enreg.)
     if (!fromHold && voicePhase === "wake" && !wake && !armedIntent) {
-      return;
+      return false;
     }
 
     if (!intent) {
       if (fromHold) {
         setFeedback(
           $("#ia-feedback"),
-          `Non compris : « ${texte} ». Commencez par note / fourniture / analyse.`,
+          `Aucun mot-clé dit — rien n’a été enregistré. Dites « note… », « fourniture… » ou « analyse… ».`,
           false
         );
       }
+      clearVoicePhraseBuffer();
       backToWakeOrIdle();
       scheduleSpeechRestart();
-      return;
+      return false;
     }
 
-    // Juste le mot-clé → démarre l’enregistrement audio (pas l’écoute continue)
+    // Juste le mot-clé → attendre le détail (sans rien écrire)
     if (isMostlyWakeWord(texte)) {
+      if (fromHold) {
+        setFeedback(
+          $("#ia-feedback"),
+          `Seulement « ${intent} » entendu. Dites toute la phrase (ex. fourniture 2 bidons de chlore).`,
+          false
+        );
+        clearVoicePhraseBuffer();
+        backToWakeOrIdle();
+        scheduleSpeechRestart();
+        return false;
+      }
       enterCapture(intent);
-      return;
+      return false;
     }
 
-    // Contenu utile → une seule commande, puis retour écoute mots-clés
+    // Contenu utile → enregistrer, puis retour écoute permanente
+    let full = texte;
+    if (armedIntent && !detectWakeIntent(texte)) {
+      full = `${armedIntent} ${texte}`;
+    }
+    full = stripStopSuffix(full);
+    const finalIntent = detectWakeIntent(full) || armedIntent || intent;
+    const contenu = stripWakePrefix(full, finalIntent);
+    if (!contenu || isStopCommand(contenu) || /^\d+([.,]\d+)?$/.test(contenu.trim())) {
+      // Pas encore de détail (ou juste un chiffre) → garder le buffer, continuer d’écouter
+      if (!fromHold && finalIntent) {
+        enterCapture(finalIntent);
+        return false;
+      }
+      setFeedback(
+        $("#ia-feedback"),
+        `Il manque le détail après « ${finalIntent || "note"} ».`,
+        false
+      );
+      clearVoicePhraseBuffer();
+      terminerEnregistrementVocal();
+      scheduleSpeechRestart();
+      return false;
+    }
+
     processingVocal = true;
     voicePhase = "busy";
     clearCaptureTimer();
     stopSpeechRec({ keepWanted: true });
     setListenStatus("busy");
     try {
-      let full = texte;
-      if (armedIntent && !detectWakeIntent(texte)) {
-        full = `${armedIntent} ${texte}`;
-      }
-      full = stripStopSuffix(full);
-      const finalIntent = detectWakeIntent(full) || armedIntent || intent;
-      const contenu = stripWakePrefix(full, finalIntent);
-      if (!contenu || isStopCommand(contenu)) {
-        terminerEnregistrementVocal();
-        return;
-      }
       setIntent(finalIntent);
+      // Écrire seulement maintenant (contenu sans mot-clé), puis envoyer
       $("#ia-texte").value = contenu;
-      await envoyerCommande(full);
+      await envoyerCommande(contenu, finalIntent);
       armedIntent = null;
+      $("#ia-texte").value = "";
+      clearVoicePhraseBuffer();
+      return true;
     } finally {
       processingVocal = false;
       backToWakeOrIdle();
@@ -2377,12 +2491,45 @@
     const rec = new SR();
     speechRec = rec;
     rec.lang = "fr-FR";
-    // Jamais en continue : sessions courtes, uniquement pour détecter les mots-clés
-    rec.continuous = false;
+    // Écoute continue pour attraper « fourniture 2 bidons… » d’un coup
+    rec.continuous = true;
     rec.interimResults = true;
     rec.maxAlternatives = 3;
 
-    let interimWakeArmed = false;
+    const flushPhraseBuffer = () => {
+      voicePhraseTimer = null;
+      const buffered = voicePhraseBuffer.trim();
+      if (!buffered || holdRecording || processingVocal) return;
+
+      const intent = detectWakeIntent(buffered) || armedIntent;
+      if (!intent) {
+        voicePhraseBuffer = "";
+        return;
+      }
+
+      const normalized = normaliserTexteVocal(buffered);
+      const contenu = stripWakePrefix(normalized, intent).trim();
+
+      // Mot-clé seul, ou juste un chiffre (ex. « fourniture 2 ») → encore attendre la suite
+      // SANS vider le buffer (sinon on perd le « 2 »)
+      if (!contenu || isMostlyWakeWord(normalized) || /^\d+([.,]\d+)?$/.test(contenu)) {
+        enterCapture(intent);
+        voicePhraseTimer = setTimeout(flushPhraseBuffer, mobile ? 1600 : 1100);
+        return;
+      }
+
+      // Il manque souvent l’unité juste après le chiffre → encore un peu de marge
+      if (/^\d+([.,]\d+)?\s+(de|des|du)?$/i.test(contenu)) {
+        enterCapture(intent);
+        voicePhraseTimer = setTimeout(flushPhraseBuffer, mobile ? 1400 : 900);
+        return;
+      }
+
+      // Ne pas vider avant succès : si le parsing attend encore, on garde la phrase
+      traiterTexteVocal(normalized).then((ok) => {
+        if (ok) clearVoicePhraseBuffer();
+      });
+    };
 
     rec.onstart = () => {
       if (voicePhase === "capture") setListenStatus("capture");
@@ -2393,49 +2540,35 @@
     };
 
     rec.onresult = (event) => {
+      if (holdRecording || processingVocal) return;
+
       let finalTxt = "";
-      let interimTxt = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const piece = event.results[i][0]?.transcript || "";
         if (event.results[i].isFinal) finalTxt += piece;
-        else interimTxt += piece;
-      }
-      const live = (finalTxt || interimTxt).trim();
-      if (live && (voicePhase === "capture" || voicePhase === "wake")) {
-        $("#ia-texte").value = live;
-      }
-
-      // Wake anticipé sur interim (téléphone coupe souvent avant le final)
-      if (
-        mobile &&
-        !interimWakeArmed &&
-        (voicePhase === "wake" || voicePhase === "idle") &&
-        detectWakeIntent(interimTxt)
-      ) {
-        interimWakeArmed = true;
-        const w = detectWakeIntent(interimTxt);
-        if (w && isMostlyWakeWord(interimTxt)) {
-          try {
-            rec.abort();
-          } catch {
-            /* */
-          }
-          enterCapture(w);
-          return;
-        }
       }
 
       const txt = finalTxt.trim();
       if (!txt) return;
 
-      if (voicePhase === "wake" || voicePhase === "idle") {
-        if (!detectWakeIntent(txt) && !armedIntent) return;
-        traiterTexteVocal(txt);
+      // Accumuler toute la phrase (ne pas écrire tant que ce n’est pas complet)
+      voicePhraseBuffer = `${voicePhraseBuffer} ${txt}`.trim();
+      if (voicePhraseTimer) clearTimeout(voicePhraseTimer);
+
+      const hasKeyword = !!(detectWakeIntent(voicePhraseBuffer) || armedIntent);
+      if (!hasKeyword) {
+        voicePhraseBuffer = "";
         return;
       }
-      if (voicePhase === "capture") {
-        traiterTexteVocal(txt);
-      }
+
+      const waitMs = isMostlyWakeWord(voicePhraseBuffer)
+        ? mobile
+          ? 2000
+          : 1400
+        : mobile
+          ? 1100
+          : 700;
+      voicePhraseTimer = setTimeout(flushPhraseBuffer, waitMs);
     };
 
     rec.onerror = (ev) => {
@@ -2452,7 +2585,7 @@
       if (err === "network" && mobile) {
         setFeedback(
           $("#ia-feedback"),
-          "Écoute auto instable sur ce téléphone — utilisez « Maintenir pour parler ».",
+          "Écoute instable sur ce téléphone — utilisez « Maintenir pour parler » en secours.",
           false
         );
       }
@@ -2478,6 +2611,7 @@
     wantWakeListen = false;
     armedIntent = null;
     clearCaptureTimer();
+    clearVoicePhraseBuffer();
     stopSpeechRec();
     voicePhase = "idle";
     updateEcouteButton();
@@ -2501,27 +2635,21 @@
       updateEcouteButton();
       setFeedback($("#ia-feedback"), "Micro refusé dans le navigateur.", false);
       setListenStatus("idle");
-      return;
+      throw new Error("Micro refusé");
     }
     const ok = startSpeechRec();
     if (!ok) {
-      // Pas de Web Speech (souvent iPhone Safari) → proposer maintien
       setListenStatus("idle");
       setFeedback(
         $("#ia-feedback"),
         isMobileVocal()
-          ? "Écoute mots-clés indisponible ici — utilisez le bouton Enregistrer."
-          : "Écoute mots-clés indisponible — utilisez Chrome/Edge ou le bouton Enregistrer.",
+          ? "Écoute auto indisponible — utilisez « Maintenir pour parler »."
+          : "Écoute auto indisponible — utilisez Chrome/Edge ou « Maintenir pour parler ».",
         false
       );
-    } else {
-      setListenStatus("listening");
-      setFeedback(
-        $("#ia-feedback"),
-        "Écoute mots-clés ON : dès que vous dites note / fourniture / analyse, l’enregistrement démarre. Sinon rien n’est enregistré.",
-        true
-      );
+      throw new Error("SpeechRecognition indisponible");
     }
+    setListenStatus("listening");
   }
 
   function pickRecorderMime() {
@@ -2554,6 +2682,9 @@
     }
   }
 
+  /** true si l’enregistrement a été lancé après un mot-clé déjà dit */
+  let holdAfterKeyword = false;
+
   async function startHoldRecord({ fromWake = false, intent = null } = {}) {
     if (holdRecording || processingVocal) return;
     // Couper l’écoute mots-clés pendant l’enregistrement (évite la double capture)
@@ -2571,7 +2702,9 @@
       holdRecorder.start(isMobileVocal() ? 120 : 250);
       holdRecording = true;
       holdStartedAt = Date.now();
-      const forced = intent || intentForce || armedIntent;
+      // Mot-clé déjà dit (écoute) uniquement — les puces ne forcent pas l’enregistrement
+      const forced = intent || (fromWake ? armedIntent : null);
+      holdAfterKeyword = !!(fromWake && forced);
       if (forced) {
         armedIntent = forced;
         setIntent(forced);
@@ -2579,14 +2712,18 @@
       voicePhase = "capture";
       setListenStatus("capture");
       updateRecordButton();
-      const hint = forced
-        ? `Enregistrement ${forced}… parlez puis appuyez sur Arrêter.`
-        : fromWake
-          ? "Enregistrement… dites la suite, puis Arrêter."
-          : "Enregistrement… dites note / fourniture / analyse puis Arrêter.";
+      const mobile = isMobileVocal();
+      const hint = holdAfterKeyword
+        ? mobile
+          ? `Mot-clé « ${forced} » — parlez la suite, relâchez pour enregistrer.`
+          : `Mot-clé « ${forced} » — parlez la suite puis Arrêter.`
+        : mobile
+          ? "Maintenez et dites un mot-clé + le détail (ex. fourniture 2 bidons de chlore)."
+          : "Dites un mot-clé + le détail (note / fourniture / analyse), puis Arrêter.";
       setFeedback($("#ia-feedback"), hint, null);
     } catch (err) {
       holdRecording = false;
+      holdAfterKeyword = false;
       updateRecordButton();
       setFeedback($("#ia-feedback"), err.message || "Micro indisponible.", false);
       scheduleSpeechRestart();
@@ -2666,12 +2803,14 @@
         );
       }
       let texte = data.texte || "";
-      const forced = armedIntent || intentForce;
-      if (forced && texte && !detectWakeIntent(texte)) {
-        texte = `${forced} ${texte}`;
+      const keywordAlreadySaid = holdAfterKeyword && !!armedIntent;
+      if (keywordAlreadySaid && texte && !detectWakeIntent(texte)) {
+        texte = `${armedIntent} ${texte}`;
       }
-      await traiterTexteVocal(texte, { fromHold: true });
+      holdAfterKeyword = false;
+      await traiterTexteVocal(texte, { fromHold: true, keywordAlreadySaid });
     } catch (err) {
+      holdAfterKeyword = false;
       setFeedback($("#ia-feedback"), err.message || "Erreur vocal.", false);
       backToWakeOrIdle();
       scheduleSpeechRestart();
@@ -2731,32 +2870,36 @@
     await startWakeListen();
   });
 
-  async function envoyerCommande(texte) {
+  async function envoyerCommande(texte, intentOverride = null) {
     if (!clientActif) {
       setFeedback($("#ia-feedback"), "Aucun client actif.", false);
       return;
     }
-    const t = normaliserTexteVocal((texte || "").trim());
+    let t = normaliserTexteVocal((texte || "").trim());
     if (!t) {
       setFeedback($("#ia-feedback"), "Texte vide.", false);
       return;
     }
-    $("#ia-texte").value = t;
-    if (!intentForce) {
-      const detected = detectWakeIntent(t);
-      if (detected) setIntent(detected);
-    }
-    if (!intentForce && !detectWakeIntent(t)) {
+    const detected =
+      intentOverride || intentForce || detectWakeIntent(t) || null;
+    if (!detected) {
       setFeedback(
         $("#ia-feedback"),
-        `Non compris : « ${t} ». Dites « fourniture 3 bidon de chlore ».`,
+        `Non compris : « ${t} ». Dites « fourniture 3 bidons de chlore ».`,
         false
       );
       return;
     }
+    setIntent(detected);
+    // Le mot-clé sert seulement à router — on ne l’écrit jamais
+    const contenu = stripWakePrefix(t, detected) || t;
+    $("#ia-texte").value = contenu;
     try {
-      const payload = { client_id: clientActif.id, texte: t };
-      if (intentForce) payload.intent_force = intentForce;
+      const payload = {
+        client_id: clientActif.id,
+        texte: contenu,
+        intent_force: detected,
+      };
       const res = await api("/api/ia", { method: "POST", body: JSON.stringify(payload) });
       if (!res.success) {
         setFeedback($("#ia-feedback"), res.message || "Non compris.", false);
@@ -2766,17 +2909,20 @@
         const d = res.note.date_ref
           ? `${formatDateFr(res.note.date)} · ${formatDateFr(res.note.date_ref)}`
           : formatDateFr(res.note.date);
+        $("#ia-texte").value = res.note.texte || "";
         setFeedback($("#ia-feedback"), `Note (${d}) : ${res.note.texte}`, true);
       } else if (res.intent === "analyse") {
         const d = res.analyse.date_ref
           ? `${formatDateFr(res.analyse.date)} · ${formatDateFr(res.analyse.date_ref)}`
           : formatDateFr(res.analyse.date);
+        $("#ia-texte").value = res.analyse.texte || "";
         setFeedback($("#ia-feedback"), `Analyse (${d}) : ${res.analyse.texte}`, true);
       } else if (res.intent === "fourniture") {
         const f = res.fourniture;
         const d = f.date_ref
           ? `${formatDateFr(f.date)} · ${formatDateFr(f.date_ref)}`
           : formatDateFr(f.date);
+        $("#ia-texte").value = `${f.quantite} × ${f.description}`;
         setFeedback(
           $("#ia-feedback"),
           `Fourniture (${d}) : ${f.quantite} × ${f.description}`,
@@ -2795,11 +2941,85 @@
 
   const btnParler = $("#btn-parler");
   if (btnParler) {
-    // Clic = démarrer / arrêter (plus de maintien continu)
-    btnParler.addEventListener("click", (e) => {
-      e.preventDefault();
-      toggleRecord();
-    });
+    // Téléphone : maintenir pendant toute la phrase (évite de ne capter que « fourniture »)
+    // Desktop : clic pour démarrer / arrêter
+    if (isMobileVocal()) {
+      let holdPointerId = null;
+      const down = (e) => {
+        if (e.button != null && e.button !== 0) return;
+        if (holdRecording || holdPointerId != null || processingVocal) return;
+        e.preventDefault();
+        holdPointerId = e.pointerId ?? "touch";
+        try {
+          if (e.pointerId != null) btnParler.setPointerCapture(e.pointerId);
+        } catch {
+          /* */
+        }
+        startHoldRecord();
+      };
+      const up = (e) => {
+        if (holdPointerId == null && !holdRecording) return;
+        if (
+          e.pointerId != null &&
+          holdPointerId != null &&
+          holdPointerId !== "touch" &&
+          e.pointerId !== holdPointerId
+        ) {
+          return;
+        }
+        e.preventDefault();
+        holdPointerId = null;
+        try {
+          if (e.pointerId != null && btnParler.hasPointerCapture?.(e.pointerId)) {
+            btnParler.releasePointerCapture(e.pointerId);
+          }
+        } catch {
+          /* */
+        }
+        stopHoldRecord();
+      };
+      btnParler.addEventListener("pointerdown", down);
+      btnParler.addEventListener("pointerup", up);
+      btnParler.addEventListener("pointercancel", up);
+      btnParler.addEventListener("lostpointercapture", () => {
+        if (holdRecording) {
+          holdPointerId = null;
+          stopHoldRecord();
+        }
+      });
+      if (!window.PointerEvent) {
+        btnParler.addEventListener(
+          "touchstart",
+          (e) => {
+            if (e.touches.length > 1) return;
+            e.preventDefault();
+            down(e);
+          },
+          { passive: false }
+        );
+        btnParler.addEventListener(
+          "touchend",
+          (e) => {
+            e.preventDefault();
+            up(e);
+          },
+          { passive: false }
+        );
+        btnParler.addEventListener(
+          "touchcancel",
+          (e) => {
+            e.preventDefault();
+            up(e);
+          },
+          { passive: false }
+        );
+      }
+    } else {
+      btnParler.addEventListener("click", (e) => {
+        e.preventDefault();
+        toggleRecord();
+      });
+    }
     btnParler.addEventListener("contextmenu", (e) => e.preventDefault());
     updateRecordButton();
   }

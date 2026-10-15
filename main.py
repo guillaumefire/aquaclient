@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.7.6"
+APP_VERSION = "1.8.2"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -470,15 +470,57 @@ def corriger_transcription(texte: str) -> str:
         "dix": "10",
         "onze": "11",
         "douze": "12",
+        "treize": "13",
+        "quatorze": "14",
         "quinze": "15",
+        "seize": "16",
         # « vingt » géré avant dans preparer_dates_orales
     }
     for mot, chiffre in nombres.items():
         t = re.sub(rf"\b{mot}\b", chiffre, t, flags=re.I)
+    # Erreurs Whisper / Web Speech fréquentes pour « 2 » / « 3 »
+    # « deux » → souvent « de », « des », « to », « ceux » devant une unité
+    _unite = (
+        r"bidon|sac|seau|cartouche|litre|kg|paquet|boite|boîte|chlore|brome"
+    )
+    t = re.sub(
+        rf"\b(to|too|two|ceux|d['’]?eux|deuxe?|deu)\s+({_unite})\b",
+        r"2 \2",
+        t,
+        flags=re.I,
+    )
+    # « fourniture de bidon » = souvent « deux bidon » mal entendu
+    t = re.sub(
+        rf"\b(fourniture|facture|facturer)\s+(de|des|du)\s+({_unite})\b",
+        r"\1 2 \3",
+        t,
+        flags=re.I,
+    )
+    t = re.sub(
+        rf"^(de|des|du)\s+({_unite})\b",
+        r"2 \2",
+        t,
+        flags=re.I,
+    )
+    t = re.sub(
+        rf"\b(troie|troi)\s+({_unite})\b",
+        r"3 \2",
+        t,
+        flags=re.I,
+    )
     # « un/une bidon » → 1 bidon (seulement devant un produit)
     t = re.sub(
         r"\b(un|une)\s+(bidon|sac|cartouche|seau|litre|kg|paquet|boite|boîte)\b",
         r"1 \2",
+        t,
+        flags=re.I,
+    )
+    # « 2bidons », « x2 », « 2 x »
+    t = re.sub(r"\b(\d+)\s*x\s*(?=\w)", r"\1 ", t, flags=re.I)
+    t = re.sub(r"\bx\s*(\d+)\b", r"\1", t, flags=re.I)
+    t = re.sub(
+        r"\b(\d+)(bidon|sac|seau|cartouche|litre|paquet|boite|boîte)\b",
+        r"\1 \2",
         t,
         flags=re.I,
     )
@@ -1315,7 +1357,14 @@ def parse_commande(texte: str, intent_force: str | None = None) -> dict[str, Any
             }
 
     if intent == "note":
-        contenu = re.sub(r"^(une\s+)?(note|noter)[:\s,-]*", "", raw, count=1, flags=re.I).strip()
+        contenu = re.sub(
+            r"\b(une\s+)?(notes?|noter)\b[:\s,-]*",
+            " ",
+            raw,
+            count=1,
+            flags=re.I,
+        )
+        contenu = re.sub(r"\s+", " ", contenu).strip(" ,.-")
         contenu = strip_date_from_text(contenu)
         if not contenu and not intent_force:
             return {"intent": "note", "ok": False, "message": "Que souhaitez-vous noter ?"}
@@ -1346,21 +1395,13 @@ def parse_commande(texte: str, intent_force: str | None = None) -> dict[str, Any
 
     if intent == "fourniture":
         body = re.sub(
-            r"^(une\s+)?(facture|facturer|fourniture|fournitures)[:\s,-]*",
-            "",
+            r"\b(une\s+)?(facture|facturer|fourniture|fournitures)\b[:\s,-]*",
+            " ",
             raw,
-            count=1,
             flags=re.I,
-        ).strip()
-        body_l = body.lower()
-        qty = 1.0
-        # « 3 bidon… » ou « 3x bidon… » ou « x3 bidon… »
-        m_qty = re.match(r"^(?:x\s*)?(\d+(?:[.,]\d+)?)\s*(?:x\s+)?(.+)$", body_l)
-        if m_qty:
-            qty = float(m_qty.group(1).replace(",", "."))
-            desc = body[m_qty.start(2) : m_qty.start(2) + len(m_qty.group(2))]
-        else:
-            desc = body
+        )
+        body = re.sub(r"\s+", " ", body).strip(" ,.-")
+        qty, desc = _extraire_quantite(body)
         # retirer prix s'il est dit par habitude
         desc = re.sub(
             r"\s*(?:à|a|pour)?\s*\d+(?:[.,]\d+)?\s*(?:€|euros?|euro).*$",
@@ -1370,7 +1411,13 @@ def parse_commande(texte: str, intent_force: str | None = None) -> dict[str, Any
         ).strip()
         desc = strip_date_from_text(desc)
         desc = re.sub(r"\s*l['']unité\s*$", "", desc, flags=re.I).strip()
-        # Pluriel courant à l'oral : « bidons » déjà normalisé en « bidon »
+        desc = re.sub(
+            r"\b(facture|facturer|fourniture|fournitures)\b",
+            " ",
+            desc,
+            flags=re.I,
+        )
+        desc = re.sub(r"\s+", " ", desc).strip(" ,.-")
         if not desc:
             return {
                 "intent": "fourniture",
@@ -1565,14 +1612,34 @@ def _singulariser_unite(mot: str) -> str:
 def _extraire_quantite(texte: str) -> tuple[float, str]:
     """Trouve une quantité n'importe où : « j'ai mis 2 bidons de chlore »."""
     t = texte or ""
+    # « de/des bidon » en tête = souvent « deux » mal reconnu
+    t = re.sub(
+        r"^(de|des|du)\s+(bidon|sac|seau|cartouche|litre|paquet|boite|boîte)\b",
+        r"2 \2",
+        t.strip(),
+        flags=re.I,
+    )
     low = t.lower()
+    unites = (
+        r"bidons?|sacs?|seaux?|cartouches?|litres?|kg|paquets?|boites?|boîtes?|"
+        r"chlore|brome|sel|sable|floculant|algicide"
+    )
     m = re.search(
-        r"\b(\d+(?:[.,]\d+)?)\s*(?:x\s*)?(bidons?|sacs?|seaux?|cartouches?|litres?|kg|paquets?|boites?|boîtes?)\b",
+        rf"\b(\d+(?:[.,]\d+)?)\s*(?:x\s*)?(?:de\s+)?({unites})\b",
         low,
     )
     if m:
         qty = float(m.group(1).replace(",", "."))
-        unite = _singulariser_unite(m.group(2))
+        unite_raw = m.group(2)
+        # Produit seul (chlore…) : garder le mot ; unité (bidon…) : singulariser
+        if re.match(
+            r"^(chlore|brome|sel|sable|floculant|algicide)$",
+            unite_raw,
+            flags=re.I,
+        ):
+            unite = unite_raw
+        else:
+            unite = _singulariser_unite(unite_raw)
         avant = t[: m.start()].strip()
         apres = t[m.end() :].strip()
         desc = " ".join(p for p in (avant, unite, apres) if p)
@@ -1590,6 +1657,21 @@ def _extraire_quantite(texte: str) -> tuple[float, str]:
         qty = float(m.group(1).replace(",", "."))
         desc = t[m.start(2) : m.end(2)].strip()
         return qty, desc
+
+    # Chiffre seul en tête + reste sans unité collée : « 2 chlore liquide »
+    m = re.match(r"^(\d+(?:[.,]\d+)?)\s+(.+)$", low)
+    if m and not re.match(r"^\d", m.group(2)):
+        qty = float(m.group(1).replace(",", "."))
+        desc = t[m.start(2) : m.end(2)].strip()
+        if desc:
+            return qty, desc
+
+    # « quantité 2 », « 2 au total » en fin de phrase
+    m = re.search(r"\b(?:quantit[ée]|qte|qty)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\b", low)
+    if m:
+        qty = float(m.group(1).replace(",", "."))
+        desc = (t[: m.start()] + " " + t[m.end() :]).strip()
+        return qty, re.sub(r"\s+", " ", desc).strip(" ,.-")
 
     return 1.0, t
 
