@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.6"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -744,9 +744,11 @@ def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
 
     out: list[dict[str, str]] = []
     for item in items:
+        com = ""
         if isinstance(item, dict):
             lab = str(item.get("label") or item.get("texte") or "").strip()
             iid = str(item.get("id") or "").strip()
+            com = str(item.get("commentaire") or "").strip()
             # Passif : ignorer les non sélectionnés si le flag est présent
             if "selected" in item and not item.get("selected"):
                 continue
@@ -755,14 +757,17 @@ def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
             iid = ""
         if not lab:
             continue
-        out.append({"id": iid or _new_instruction_id(), "label": lab})
+        entry: dict[str, str] = {"id": iid or _new_instruction_id(), "label": lab}
+        if com:
+            entry["commentaire"] = com
+        out.append(entry)
     return out
 
 
 def parse_hivernage_config(
     raw: Any, *, fallback_list: Any = None
 ) -> dict[str, Any]:
-    """Normalise {mode, commentaire, steps:[{id,label,parent_id,selected}]}."""
+    """Normalise {mode, commentaire, steps:[{id,label,parent_id,selected,commentaire}]}."""
     data = raw
     if isinstance(raw, str):
         text = raw.strip()
@@ -797,10 +802,12 @@ def parse_hivernage_config(
 
     steps: list[dict[str, Any]] = []
     for item in steps_raw:
+        step_com = ""
         if isinstance(item, dict):
             lab = str(item.get("label") or item.get("texte") or "").strip()
             iid = str(item.get("id") or "").strip() or _new_instruction_id()
             parent_id = str(item.get("parent_id") or "").strip() or None
+            step_com = str(item.get("commentaire") or "").strip()
             selected = item.get("selected")
             if selected is None:
                 selected = bool(lab) if mode == "actif" else False
@@ -823,6 +830,7 @@ def parse_hivernage_config(
                 "label": lab,
                 "parent_id": parent_id,
                 "selected": bool(selected),
+                "commentaire": step_com,
             }
         )
     return {"mode": mode, "commentaire": commentaire, "steps": steps}
@@ -841,7 +849,14 @@ def hivernage_steps_for_visite(cfg: dict[str, Any] | None) -> list[dict[str, str
             continue
         if mode == "passif" and not s.get("selected"):
             continue
-        out.append({"id": str(s.get("id") or _new_instruction_id()), "label": lab})
+        entry: dict[str, str] = {
+            "id": str(s.get("id") or _new_instruction_id()),
+            "label": lab,
+        }
+        com = str(s.get("commentaire") or "").strip()
+        if com:
+            entry["commentaire"] = com
+        out.append(entry)
     return out
 
 
@@ -927,6 +942,7 @@ def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None)
                     "label": s["label"],
                     "parent_id": None,
                     "selected": True,
+                    "commentaire": str(s.get("commentaire") or "").strip(),
                 }
                 for s in parse_checklist_hivernage(body.checklist_hivernage)
             ]
@@ -2037,14 +2053,18 @@ def build_checklist(client: dict[str, Any], type_visite: str) -> list[dict[str, 
             photos_by_inst = {}
         for idx, step in enumerate(steps, start=1):
             iid = step.get("id") or slug_checklist_id(step["label"], idx)
-            items.append({
+            entry: dict[str, Any] = {
                 "id": iid,
                 "label": step["label"],
                 "warn": None,
                 "optional": False,
                 "done": False,
                 "photos": photos_by_inst.get(iid, []),
-            })
+            }
+            com = str(step.get("commentaire") or "").strip()
+            if com:
+                entry["commentaire"] = com
+            items.append(entry)
     elif type_visite == "entretien_simple":
         # Entretien classique : analyse + lavage/rinçage + paniers éventuels
         add("analyse", "Analyse")

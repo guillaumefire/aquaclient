@@ -1914,6 +1914,28 @@ body:has(#screen-home.screen--active) .brand-tag {
   margin-top: 0.75rem;
 }
 
+.hiv-step-com {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.55rem 0.7rem;
+  font: inherit;
+  font-size: 0.9rem;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+  min-height: 2.6rem;
+}
+
+.check-com {
+  display: block;
+  margin-top: 0.2rem;
+  font-style: normal;
+  color: var(--muted, #5a6b70);
+  font-weight: 400;
+  white-space: pre-wrap;
+}
+
 /* ── Éditeur checklist hivernage + photos ── */
 .hiv-editor {
   display: grid;

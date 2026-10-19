@@ -118,6 +118,7 @@
         label: item.label,
         parent_id: null,
         selected: false,
+        commentaire: "",
         photos: [],
       });
       (item.children || []).forEach((ch) => {
@@ -126,6 +127,7 @@
           label: ch.label,
           parent_id: item.id,
           selected: false,
+          commentaire: "",
           photos: [],
         });
       });
@@ -145,6 +147,7 @@
       return {
         ...tpl,
         selected: prev ? !!prev.selected : false,
+        commentaire: prev ? String(prev.commentaire || "").trim() : "",
         photos: prev?.photos || [],
       };
     });
@@ -165,6 +168,7 @@
         return steps.some(
           (s) =>
             s.selected ||
+            (s.commentaire || "").trim() ||
             (hivernagePhotosByInst[s.id] || []).length ||
             (pendingPhotosByInst[s.id] || []).length
         );
@@ -173,6 +177,7 @@
     const steps = optionsSteps[key] || [];
     return steps.some((s) => {
       if ((s.label || "").trim()) return true;
+      if ((s.commentaire || "").trim()) return true;
       if ((s.photos || []).length) return true;
       if ((hivernagePhotosByInst[s.id] || []).length) return true;
       if ((pendingPhotosByInst[s.id] || []).length) return true;
@@ -360,6 +365,15 @@
     photosEl.appendChild(addBtn);
   }
 
+  function bindStepCommentaire(row, step) {
+    const ta = $("textarea[data-step-com]", row);
+    if (!ta) return;
+    ta.addEventListener("input", () => {
+      step.commentaire = ta.value;
+      refreshOptionButtonLabels();
+    });
+  }
+
   function renderPassifHivernageEditor(root) {
     ensurePassifHivernageSteps();
     const steps = optionsSteps.hivernage || [];
@@ -376,12 +390,14 @@
         `<input type="checkbox" ${step.selected ? "checked" : ""} />` +
         `<span>${escapeHtml(step.label)}</span>` +
         `</label>` +
+        `<textarea class="hiv-step-com" data-step-com rows="2" placeholder="Commentaire pour cette étape…">${escapeHtml(step.commentaire || "")}</textarea>` +
         `<div class="hiv-photos" data-photos></div>`;
       const chk = $("input[type='checkbox']", row);
       chk?.addEventListener("change", () => {
         step.selected = !!chk.checked;
         refreshOptionButtonLabels();
       });
+      bindStepCommentaire(row, step);
       appendStepPhotos($("[data-photos]", row), step);
       list.appendChild(row);
     });
@@ -412,6 +428,7 @@
       return;
     }
 
+    const isHiv = key === "hivernage";
     steps.forEach((step) => {
       const row = document.createElement("div");
       row.className = "hiv-step";
@@ -421,9 +438,13 @@
         `<input type="text" value="${escapeHtml(step.label)}" placeholder="Info (ex. Pompe Speedeo 1.5 CV)…" />` +
         `<button type="button" class="hiv-step-remove" data-act="remove">Retirer</button>` +
         `</div>` +
+        (isHiv
+          ? `<textarea class="hiv-step-com" data-step-com rows="2" placeholder="Commentaire pour cette ligne…">${escapeHtml(step.commentaire || "")}</textarea>`
+          : "") +
         `<div class="hiv-photos" data-photos></div>`;
 
       appendStepPhotos($("[data-photos]", row), step);
+      if (isHiv) bindStepCommentaire(row, step);
 
       $(".hiv-step-remove", row)?.addEventListener("click", () => {
         if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
@@ -481,13 +502,13 @@
     });
     if (hint) {
       hint.textContent = passif
-        ? "Coche les étapes concernées. Les lignes indentées sont des sous-réponses de la vidange hydraulique. Photos et commentaire possibles."
-        : "Hivernage actif : ajoute des lignes libres + photos, et un commentaire si besoin.";
+        ? "Coche les étapes concernées. Chaque ligne a son commentaire + photos. Les lignes indentées sont des sous-réponses de la vidange hydraulique."
+        : "Hivernage actif : lignes libres, chacune avec commentaire + photos. Commentaire général en bas si besoin.";
     }
     if (modeHint) {
       modeHint.textContent = passif
-        ? "Passif : sélectionne les éléments de la liste (sous-réponses sous la vidange hydraulique)."
-        : "Actif : lignes libres + photos.";
+        ? "Passif : sélectionne les éléments (commentaire et photos par étape)."
+        : "Actif : lignes libres + commentaire et photos par ligne.";
     }
   }
 
@@ -629,6 +650,7 @@
                   hivernageMeta.mode === "passif"
                     ? !!s.selected
                     : !!(s.label || "").trim(),
+                commentaire: String(s.commentaire || "").trim(),
               })).filter((s) => s.label),
             };
             return;
@@ -889,7 +911,9 @@
         if (hivernageMeta.mode === "passif") {
           ensurePassifHivernageSteps();
         } else if (!(optionsSteps.hivernage || []).length) {
-          optionsSteps.hivernage = [{ id: newInstructionId(), label: "", photos: [] }];
+          optionsSteps.hivernage = [
+            { id: newInstructionId(), label: "", commentaire: "", photos: [] },
+          ];
         }
       } else if (!(optionsSteps[key] || []).length) {
         optionsSteps[key] = [{ id: newInstructionId(), label: "", photos: [] }];
@@ -1084,11 +1108,31 @@
       if (selectedLabels.has("pomme de filtration")) {
         selectedLabels.add("pompe de filtration");
       }
+      const comById = {};
+      const comByLabel = {};
+      hivStepsRaw.forEach((s) => {
+        if (!s || typeof s !== "object") return;
+        const c = String(s.commentaire || "").trim();
+        if (!c) return;
+        const iid = String(s.id || "").trim();
+        const lab = String(s.label || s.texte || "")
+          .trim()
+          .toLowerCase();
+        if (iid === "vh_pomme" || iid === "vh_pompe") comById.vh_pompe = c;
+        else if (iid) comById[iid] = c;
+        if (lab === "pomme de filtration" || lab === "pompe de filtration") {
+          comByLabel["pompe de filtration"] = c;
+        } else if (lab) comByLabel[lab] = c;
+      });
       ensurePassifHivernageSteps();
       optionsSteps.hivernage.forEach((s) => {
         s.selected =
           selectedIds.has(s.id) ||
           selectedLabels.has((s.label || "").toLowerCase());
+        s.commentaire =
+          comById[s.id] ||
+          comByLabel[(s.label || "").toLowerCase()] ||
+          "";
       });
     } else {
       optionsSteps.hivernage = hivStepsRaw
@@ -1097,12 +1141,15 @@
             return {
               id: String(item.id || "").trim() || newInstructionId(),
               label: String(item.label || item.texte || "").trim(),
+              commentaire: String(item.commentaire || "").trim(),
               photos: [],
               selected: true,
             };
           }
           const label = String(item || "").trim();
-          return label ? { id: newInstructionId(), label, photos: [], selected: true } : null;
+          return label
+            ? { id: newInstructionId(), label, commentaire: "", photos: [], selected: true }
+            : null;
         })
         .filter(Boolean);
     }
@@ -1248,7 +1295,12 @@
     optionsSteps[activeOption] = [
       ...labeled,
       ...emptyKept,
-      { id: newInstructionId(), label: "", photos: [] },
+      {
+        id: newInstructionId(),
+        label: "",
+        commentaire: activeOption === "hivernage" ? "" : undefined,
+        photos: [],
+      },
     ];
     renderOptionStepsEditor();
     refreshOptionButtonLabels();
@@ -1269,12 +1321,13 @@
           .map((s) => ({
             id: s.id,
             label: s.label,
+            commentaire: String(s.commentaire || "").trim(),
             photos: [],
             selected: true,
           }));
         optionsSteps.hivernage = selected.length
           ? selected
-          : [{ id: newInstructionId(), label: "", photos: [] }];
+          : [{ id: newInstructionId(), label: "", commentaire: "", photos: [] }];
       }
       applyHivernageModeUi();
       renderOptionStepsEditor();
@@ -2031,6 +2084,9 @@
         `<button type="button" class="check-btn" data-item="${escapeHtml(item.id)}">` +
         `<span class="check-mark">${item.done ? "✓" : ""}</span>` +
         `<span class="check-text"><strong>${escapeHtml(item.label)}</strong>` +
+        (item.commentaire
+          ? `<em class="check-com">${escapeHtml(item.commentaire)}</em>`
+          : "") +
         (item.warn ? `<em>${escapeHtml(item.warn)}</em>` : "") +
         (item.optional ? `<em>optionnel</em>` : "") +
         `</span></button>`;
