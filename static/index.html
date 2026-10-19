@@ -389,14 +389,35 @@
               </div>
             </div>
 
+            <div id="extra-hivernage" class="option-extra" hidden>
+              <p class="field-label">Type d’hivernage</p>
+              <div class="toggle-row" role="radiogroup" aria-label="Type d’hivernage">
+                <label class="toggle">
+                  <input type="radio" name="hivernage_mode" value="actif" id="hiv-mode-actif" checked />
+                  <span>Actif</span>
+                </label>
+                <label class="toggle">
+                  <input type="radio" name="hivernage_mode" value="passif" id="hiv-mode-passif" />
+                  <span>Passif</span>
+                </label>
+              </div>
+              <p class="muted muted--sm" id="hivernage-mode-hint">
+                Actif : lignes libres + photos. Passif : coche les étapes de la liste.
+              </p>
+            </div>
+
             <div id="bloc-option-steps">
               <p class="muted muted--sm" id="option-panel-hint">Ajoute des lignes d’information.</p>
               <div id="option-steps-editor" class="hiv-editor" aria-label="Lignes d’information"></div>
-              <div class="hiv-editor-actions">
+              <div class="hiv-editor-actions" id="bloc-add-option-step">
                 <button type="button" class="btn btn--primary btn--sm" id="btn-add-option-step">
                   + Ajouter une ligne
                 </button>
               </div>
+              <label class="field" id="bloc-hivernage-commentaire" hidden>
+                <span>Commentaire</span>
+                <textarea id="input-hivernage-commentaire" rows="3" placeholder="Commentaire libre (optionnel)…"></textarea>
+              </label>
             </div>
           </div>
         </div>

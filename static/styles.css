@@ -1878,6 +1878,42 @@ body:has(#screen-home.screen--active) .brand-tag {
   display: none !important;
 }
 
+.hiv-passif-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.hiv-step--passif {
+  padding: 0.65rem 0.75rem;
+}
+
+.hiv-step--child {
+  margin-left: 1.1rem;
+  border-left: 3px solid rgba(13, 115, 119, 0.35);
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.hiv-passif-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.hiv-passif-check input {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
+}
+
+.hiv-passif-check span {
+  line-height: 1.35;
+}
+
+#bloc-hivernage-commentaire {
+  margin-top: 0.75rem;
+}
+
 /* ── Éditeur checklist hivernage + photos ── */
 .hiv-editor {
   display: grid;

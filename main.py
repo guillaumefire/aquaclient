@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.5"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -721,12 +721,23 @@ def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
     items: list[Any]
     if isinstance(raw, list):
         items = raw
+    elif isinstance(raw, dict) and (
+        "steps" in raw or "items" in raw or "mode" in raw or "commentaire" in raw
+    ):
+        # Bloc hivernage {mode, commentaire, steps} → liste pour visite
+        cfg = parse_hivernage_config(raw)
+        return hivernage_steps_for_visite(cfg)
     else:
         text = str(raw or "").strip()
         if not text:
             return []
         try:
             data = json.loads(text)
+            if isinstance(data, dict) and (
+                "steps" in data or "mode" in data or "commentaire" in data
+            ):
+                cfg = parse_hivernage_config(data)
+                return hivernage_steps_for_visite(cfg)
             items = data if isinstance(data, list) else []
         except (json.JSONDecodeError, TypeError):
             items = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -736,6 +747,9 @@ def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
         if isinstance(item, dict):
             lab = str(item.get("label") or item.get("texte") or "").strip()
             iid = str(item.get("id") or "").strip()
+            # Passif : ignorer les non sélectionnés si le flag est présent
+            if "selected" in item and not item.get("selected"):
+                continue
         else:
             lab = str(item).strip()
             iid = ""
@@ -745,18 +759,104 @@ def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
     return out
 
 
+def parse_hivernage_config(
+    raw: Any, *, fallback_list: Any = None
+) -> dict[str, Any]:
+    """Normalise {mode, commentaire, steps:[{id,label,parent_id,selected}]}."""
+    data = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                data = None
+        else:
+            data = None
+
+    mode = "actif"
+    commentaire = ""
+    steps_raw: list[Any] = []
+
+    if isinstance(data, dict) and (
+        "mode" in data or "commentaire" in data or "steps" in data or "items" in data
+    ):
+        mode = "passif" if str(data.get("mode") or "").strip().lower() == "passif" else "actif"
+        commentaire = str(data.get("commentaire") or "").strip()
+        steps_raw = data.get("steps") if isinstance(data.get("steps"), list) else []
+        if not steps_raw and isinstance(data.get("items"), list):
+            steps_raw = data.get("items") or []
+    elif isinstance(data, list):
+        steps_raw = data
+    elif fallback_list is not None:
+        steps_raw = (
+            fallback_list
+            if isinstance(fallback_list, list)
+            else parse_checklist_hivernage(fallback_list)
+        )
+
+    steps: list[dict[str, Any]] = []
+    for item in steps_raw:
+        if isinstance(item, dict):
+            lab = str(item.get("label") or item.get("texte") or "").strip()
+            iid = str(item.get("id") or "").strip() or _new_instruction_id()
+            parent_id = str(item.get("parent_id") or "").strip() or None
+            selected = item.get("selected")
+            if selected is None:
+                selected = bool(lab) if mode == "actif" else False
+            else:
+                selected = bool(selected)
+        else:
+            lab = str(item or "").strip()
+            if not lab:
+                continue
+            iid = _new_instruction_id()
+            parent_id = None
+            selected = True
+        if not lab and mode == "actif":
+            continue
+        if not lab:
+            continue
+        steps.append(
+            {
+                "id": iid,
+                "label": lab,
+                "parent_id": parent_id,
+                "selected": bool(selected),
+            }
+        )
+    return {"mode": mode, "commentaire": commentaire, "steps": steps}
+
+
+def hivernage_steps_for_visite(cfg: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Étapes à cocher en visite (passif = sélectionnées uniquement)."""
+    cfg = cfg or {"mode": "actif", "steps": []}
+    mode = cfg.get("mode") or "actif"
+    out: list[dict[str, str]] = []
+    for s in cfg.get("steps") or []:
+        if not isinstance(s, dict):
+            continue
+        lab = str(s.get("label") or "").strip()
+        if not lab:
+            continue
+        if mode == "passif" and not s.get("selected"):
+            continue
+        out.append({"id": str(s.get("id") or _new_instruction_id()), "label": lab})
+    return out
+
+
 def serialize_checklist_hivernage(items: list[Any] | None) -> str:
     clean = parse_checklist_hivernage(items or [])
     return json.dumps(clean, ensure_ascii=False)
 
 
-def empty_options_checklists() -> dict[str, list[dict[str, str]]]:
+def empty_options_checklists() -> dict[str, Any]:
     return {k: [] for k in OPTION_CHECKLIST_KEYS}
 
 
-def parse_options_checklists(raw: Any, *, fallback_hivernage: Any = None) -> dict[str, list[dict[str, str]]]:
-    """Retourne {option: [{id, label}, ...]}."""
-    out = empty_options_checklists()
+def parse_options_checklists(raw: Any, *, fallback_hivernage: Any = None) -> dict[str, Any]:
+    """Retourne {option: [{id, label}, ...]} + hivernage_config pour l’UI."""
+    out: dict[str, Any] = empty_options_checklists()
     data: Any = raw
     if isinstance(raw, str):
         text = raw.strip()
@@ -767,20 +867,38 @@ def parse_options_checklists(raw: Any, *, fallback_hivernage: Any = None) -> dic
                 data = {}
         else:
             data = {}
+    hiv_raw = None
     if isinstance(data, dict):
         for key in OPTION_CHECKLIST_KEYS:
+            if key == "hivernage":
+                hiv_raw = data.get("hivernage")
+                continue
             out[key] = parse_checklist_hivernage(data.get(key))
-    # Rétrocompat : ancienne checklist_hivernage seule
-    if not out["hivernage"] and fallback_hivernage is not None:
-        out["hivernage"] = parse_checklist_hivernage(fallback_hivernage)
+    hiv_cfg = parse_hivernage_config(hiv_raw, fallback_list=fallback_hivernage)
+    if not hiv_cfg["steps"] and fallback_hivernage is not None and hiv_raw is None:
+        hiv_cfg = parse_hivernage_config(None, fallback_list=fallback_hivernage)
+    out["hivernage"] = hivernage_steps_for_visite(hiv_cfg)
+    out["hivernage_config"] = hiv_cfg
     return out
 
 
 def serialize_options_checklists(data: dict[str, Any] | None) -> str:
-    clean = empty_options_checklists()
+    clean: dict[str, Any] = empty_options_checklists()
     if isinstance(data, dict):
         for key in OPTION_CHECKLIST_KEYS:
+            if key == "hivernage":
+                continue
             clean[key] = parse_checklist_hivernage(data.get(key))
+        # Hivernage : objet {mode, commentaire, steps} ou liste legacy
+        if isinstance(data.get("hivernage_config"), dict):
+            cfg = parse_hivernage_config(data.get("hivernage_config"))
+        else:
+            cfg = parse_hivernage_config(data.get("hivernage"))
+        clean["hivernage"] = {
+            "mode": cfg["mode"],
+            "commentaire": cfg["commentaire"],
+            "steps": cfg["steps"],
+        }
     return json.dumps(clean, ensure_ascii=False)
 
 
@@ -788,17 +906,41 @@ def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None)
     """Persiste options_checklists + synchronise checklist_hivernage."""
     existing = existing or {}
     if getattr(body, "options_checklists", None) is not None:
-        opts = parse_options_checklists(body.options_checklists)
+        raw_opts = body.options_checklists
+        opts_for_ser = raw_opts if isinstance(raw_opts, dict) else {}
+        parsed = parse_options_checklists(raw_opts)
+        checklist = parsed.get("hivernage") or []
     else:
-        opts = parse_options_checklists(
+        opts_for_ser = parse_options_checklists(
             existing.get("options_checklists"),
             fallback_hivernage=existing.get("checklist_hivernage"),
         )
         if getattr(body, "checklist_hivernage", None) is not None:
-            opts["hivernage"] = parse_checklist_hivernage(body.checklist_hivernage)
+            cfg = parse_hivernage_config(
+                opts_for_ser.get("hivernage_config"),
+                fallback_list=body.checklist_hivernage,
+            )
+            # Remplacer les steps par la checklist envoyée (legacy)
+            cfg["steps"] = [
+                {
+                    "id": s["id"],
+                    "label": s["label"],
+                    "parent_id": None,
+                    "selected": True,
+                }
+                for s in parse_checklist_hivernage(body.checklist_hivernage)
+            ]
+            opts_for_ser = {
+                **{k: opts_for_ser.get(k) or [] for k in OPTION_CHECKLIST_KEYS if k != "hivernage"},
+                "hivernage_config": cfg,
+            }
+        checklist = hivernage_steps_for_visite(
+            opts_for_ser.get("hivernage_config")
+            or parse_hivernage_config(opts_for_ser.get("hivernage"))
+        )
     return {
-        "options_checklists": serialize_options_checklists(opts),
-        "checklist_hivernage": serialize_checklist_hivernage(opts.get("hivernage") or []),
+        "options_checklists": serialize_options_checklists(opts_for_ser),
+        "checklist_hivernage": serialize_checklist_hivernage(checklist),
     }
 
 
@@ -1152,9 +1294,19 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         "checklist_hivernage": parse_checklist_hivernage(r.get("checklist_hivernage")),
         "piscine_hivernee": from_bool_csv(r.get("piscine_hivernee", "")),
         "hivernage_en_cours": from_bool_csv(r.get("hivernage_en_cours", "")),
-        "options_checklists": parse_options_checklists(
-            r.get("options_checklists"),
-            fallback_hivernage=r.get("checklist_hivernage"),
+        **(
+            lambda opts: {
+                "options_checklists": {
+                    k: opts.get(k) or [] for k in OPTION_CHECKLIST_KEYS
+                },
+                "hivernage_config": opts.get("hivernage_config")
+                or {"mode": "actif", "commentaire": "", "steps": []},
+            }
+        )(
+            parse_options_checklists(
+                r.get("options_checklists"),
+                fallback_hivernage=r.get("checklist_hivernage"),
+            )
         ),
     }
     if password_clair:

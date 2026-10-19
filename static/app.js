@@ -52,17 +52,53 @@
   const OPTION_HINTS = {
     ouverture: "Ajoute des lignes d’info pour l’ouverture (ex. date, niveau d’eau…).",
     local_technique: "Ajoute des lignes (ex. Pompe Speedeo, Filtre sable…).",
-    hivernage: "Ajoute des lignes pour l’hivernage + photos si besoin.",
+    hivernage: "Choisis actif ou passif, puis complète les étapes + photos / commentaire.",
     entretien: "Ajoute des lignes pour l’entretien de ce client.",
     compte: "Coordonnées et accès client.",
   };
-  /** @type {Record<string, {id:string,label:string,photos:Array}[]>} */
+
+  /** Checklist fixe pour hivernage passif (× = sous-étapes de la vidange hydraulique) */
+  const HIVERNAGE_PASSIF_TEMPLATE = [
+    { id: "lavage_filtre", label: "Lavage/rinçage du filtre à sable (s)" },
+    {
+      id: "traitements",
+      label:
+        "Traitements (mise en circulation de la vanne 6 voies en recirculation pour mélanger)",
+    },
+    { id: "robot", label: "Nettoyage et rangement du robot" },
+    { id: "bassin", label: "Nettoyage bassin" },
+    { id: "flotteurs", label: "Mise en place flotteurs" },
+    { id: "paniers", label: "Nettoyage et rangement des paniers de skimmer" },
+    { id: "guizmo", label: "Mise en place guizmo" },
+    { id: "couverture", label: "Mise en place de la couverture d’hivernage" },
+    { id: "arret_filtration", label: "Arrêt filtration" },
+    {
+      id: "vidange_hydraulique",
+      label: "Vidange du réseau hydraulique",
+      children: [
+        { id: "vh_pompe", label: "Pompe de filtration" },
+        { id: "vh_filtre", label: "Filtre à sable" },
+        { id: "vh_surpresseur", label: "Surpresseur" },
+        { id: "vh_pac", label: "Vidange pompe à chaleur" },
+        { id: "vh_cellule", label: "Cellule électrolyseur" },
+        { id: "vh_chambre", label: "Chambre d’analyse" },
+        { id: "vh_reseau", label: "Réseau hydraulique" },
+        { id: "vh_vanne6", label: "Vanne 6 voies" },
+      ],
+    },
+    { id: "sondes", label: "Hivernage des sondes" },
+    { id: "disjoncter", label: "Disjoncter les coffrets électriques" },
+  ];
+
+  /** @type {Record<string, {id:string,label:string,photos:Array,parent_id?:string,selected?:boolean}[]>} */
   let optionsSteps = {
     ouverture: [],
     local_technique: [],
     hivernage: [],
     entretien: [],
   };
+  /** @type {{mode:"actif"|"passif", commentaire:string}} */
+  let hivernageMeta = { mode: "actif", commentaire: "" };
   let activeOption = null;
   /** @type {Record<string, Array>} photos serveur par instruction_id */
   let hivernagePhotosByInst = {};
@@ -74,6 +110,46 @@
     return { ouverture: [], local_technique: [], hivernage: [], entretien: [] };
   }
 
+  function flatPassifTemplate() {
+    const out = [];
+    HIVERNAGE_PASSIF_TEMPLATE.forEach((item) => {
+      out.push({
+        id: item.id,
+        label: item.label,
+        parent_id: null,
+        selected: false,
+        photos: [],
+      });
+      (item.children || []).forEach((ch) => {
+        out.push({
+          id: ch.id,
+          label: ch.label,
+          parent_id: item.id,
+          selected: false,
+          photos: [],
+        });
+      });
+    });
+    return out;
+  }
+
+  function ensurePassifHivernageSteps() {
+    const byId = Object.fromEntries(
+      (optionsSteps.hivernage || []).map((s) => [s.id, s])
+    );
+    optionsSteps.hivernage = flatPassifTemplate().map((tpl) => {
+      // Alias id historique (typo « pomme »)
+      const prev =
+        byId[tpl.id] ||
+        (tpl.id === "vh_pompe" ? byId.vh_pomme : null);
+      return {
+        ...tpl,
+        selected: prev ? !!prev.selected : false,
+        photos: prev?.photos || [],
+      };
+    });
+  }
+
   function optionHasContent(key) {
     if (key === "compte") {
       return !!(
@@ -81,6 +157,18 @@
         !$("#compte-credentials")?.hidden ||
         !$("#compte-identifiant-line")?.hidden
       );
+    }
+    if (key === "hivernage") {
+      if ((hivernageMeta.commentaire || "").trim()) return true;
+      const steps = optionsSteps.hivernage || [];
+      if (hivernageMeta.mode === "passif") {
+        return steps.some(
+          (s) =>
+            s.selected ||
+            (hivernagePhotosByInst[s.id] || []).length ||
+            (pendingPhotosByInst[s.id] || []).length
+        );
+      }
     }
     const steps = optionsSteps[key] || [];
     return steps.some((s) => {
@@ -166,7 +254,16 @@
 
   function collectHivernageFromEditor() {
     syncActiveOptionFromEditor();
-    return optionsSteps.hivernage || [];
+    syncHivernageMetaFromUi();
+    const steps = optionsSteps.hivernage || [];
+    if (hivernageMeta.mode === "passif") {
+      return steps
+        .filter((s) => s.selected && (s.label || "").trim())
+        .map((s) => ({ id: s.id, label: s.label.trim() }));
+    }
+    return steps
+      .filter((s) => (s.label || "").trim())
+      .map((s) => ({ id: s.id, label: s.label.trim() }));
   }
 
   function clearPendingPhotos() {
@@ -198,6 +295,99 @@
     refreshOptionButtonLabels();
   }
 
+  function appendStepPhotos(photosEl, step) {
+    const photos = [
+      ...(step.photos || []),
+      ...(hivernagePhotosByInst[step.id] || []),
+    ];
+    const seen = new Set();
+    const uniq = photos.filter((p) => {
+      const pid = String(p.id || "");
+      if (!pid || seen.has(pid)) return false;
+      seen.add(pid);
+      return true;
+    });
+    const pending = pendingPhotosByInst[step.id] || [];
+
+    uniq.forEach((ph) => {
+      const url = ph.url || `/api/photos/${ph.id}/file`;
+      const fig = document.createElement("div");
+      fig.className = "hiv-photo";
+      fig.innerHTML =
+        `<img src="${escapeHtml(url)}" alt="" loading="lazy" />` +
+        `<button type="button" class="hiv-photo-del" data-photo-id="${escapeHtml(ph.id)}" title="Supprimer">×</button>`;
+      $("img", fig)?.addEventListener("click", () => openPhotoLightbox(url));
+      $(".hiv-photo-del", fig)?.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (!window.confirm("Supprimer cette photo ?")) return;
+        try {
+          await api(`/api/photos/${ph.id}`, { method: "DELETE" });
+          hivernagePhotosByInst[step.id] = (hivernagePhotosByInst[step.id] || []).filter(
+            (x) => x.id !== ph.id
+          );
+          step.photos = (step.photos || []).filter((x) => x.id !== ph.id);
+          renderHivernageEditor();
+        } catch (err) {
+          setFeedback($("#nouveau-feedback"), err.message, false);
+        }
+      });
+      photosEl.appendChild(fig);
+    });
+
+    pending.forEach((ph) => {
+      const fig = document.createElement("div");
+      fig.className = "hiv-photo";
+      fig.innerHTML =
+        `<img src="${escapeHtml(ph.url)}" alt="" />` +
+        `<button type="button" class="hiv-photo-del" title="Retirer">×</button>`;
+      $("img", fig)?.addEventListener("click", () => openPhotoLightbox(ph.url));
+      $(".hiv-photo-del", fig)?.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        pendingPhotosByInst[step.id] = (pendingPhotosByInst[step.id] || []).filter(
+          (x) => x.localId !== ph.localId
+        );
+        URL.revokeObjectURL(ph.url);
+        renderHivernageEditor();
+      });
+      photosEl.appendChild(fig);
+    });
+
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.className = "hiv-add-photo";
+    addBtn.textContent = "＋ Photo";
+    addBtn.addEventListener("click", () => pickAndUploadPhoto(step.id));
+    photosEl.appendChild(addBtn);
+  }
+
+  function renderPassifHivernageEditor(root) {
+    ensurePassifHivernageSteps();
+    const steps = optionsSteps.hivernage || [];
+    root.innerHTML = "";
+    const list = document.createElement("div");
+    list.className = "hiv-passif-list";
+    steps.forEach((step) => {
+      const row = document.createElement("div");
+      row.className =
+        "hiv-step hiv-step--passif" + (step.parent_id ? " hiv-step--child" : "");
+      row.dataset.id = step.id;
+      row.innerHTML =
+        `<label class="hiv-passif-check">` +
+        `<input type="checkbox" ${step.selected ? "checked" : ""} />` +
+        `<span>${escapeHtml(step.label)}</span>` +
+        `</label>` +
+        `<div class="hiv-photos" data-photos></div>`;
+      const chk = $("input[type='checkbox']", row);
+      chk?.addEventListener("change", () => {
+        step.selected = !!chk.checked;
+        refreshOptionButtonLabels();
+      });
+      appendStepPhotos($("[data-photos]", row), step);
+      list.appendChild(row);
+    });
+    root.appendChild(list);
+  }
+
   function renderOptionStepsEditor() {
     const root = $("#option-steps-editor");
     if (!root) return;
@@ -206,8 +396,13 @@
       root.innerHTML = "";
       return;
     }
-    const steps = optionsSteps[key] || [];
 
+    if (key === "hivernage" && hivernageMeta.mode === "passif") {
+      renderPassifHivernageEditor(root);
+      return;
+    }
+
+    const steps = optionsSteps[key] || [];
     root.innerHTML = "";
     if (!steps.length) {
       const empty = document.createElement("p");
@@ -218,19 +413,6 @@
     }
 
     steps.forEach((step) => {
-      const photos = [
-        ...(step.photos || []),
-        ...(hivernagePhotosByInst[step.id] || []),
-      ];
-      const seen = new Set();
-      const uniq = photos.filter((p) => {
-        const pid = String(p.id || "");
-        if (!pid || seen.has(pid)) return false;
-        seen.add(pid);
-        return true;
-      });
-      const pending = pendingPhotosByInst[step.id] || [];
-
       const row = document.createElement("div");
       row.className = "hiv-step";
       row.dataset.id = step.id;
@@ -241,56 +423,7 @@
         `</div>` +
         `<div class="hiv-photos" data-photos></div>`;
 
-      const photosEl = $("[data-photos]", row);
-      uniq.forEach((ph) => {
-        const url = ph.url || `/api/photos/${ph.id}/file`;
-        const fig = document.createElement("div");
-        fig.className = "hiv-photo";
-        fig.innerHTML =
-          `<img src="${escapeHtml(url)}" alt="" loading="lazy" />` +
-          `<button type="button" class="hiv-photo-del" data-photo-id="${escapeHtml(ph.id)}" title="Supprimer">×</button>`;
-        $("img", fig)?.addEventListener("click", () => openPhotoLightbox(url));
-        $(".hiv-photo-del", fig)?.addEventListener("click", async (ev) => {
-          ev.stopPropagation();
-          if (!window.confirm("Supprimer cette photo ?")) return;
-          try {
-            await api(`/api/photos/${ph.id}`, { method: "DELETE" });
-            hivernagePhotosByInst[step.id] = (hivernagePhotosByInst[step.id] || []).filter(
-              (x) => x.id !== ph.id
-            );
-            step.photos = (step.photos || []).filter((x) => x.id !== ph.id);
-            renderHivernageEditor();
-          } catch (err) {
-            setFeedback($("#nouveau-feedback"), err.message, false);
-          }
-        });
-        photosEl.appendChild(fig);
-      });
-
-      pending.forEach((ph) => {
-        const fig = document.createElement("div");
-        fig.className = "hiv-photo";
-        fig.innerHTML =
-          `<img src="${escapeHtml(ph.url)}" alt="" />` +
-          `<button type="button" class="hiv-photo-del" title="Retirer">×</button>`;
-        $("img", fig)?.addEventListener("click", () => openPhotoLightbox(ph.url));
-        $(".hiv-photo-del", fig)?.addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          pendingPhotosByInst[step.id] = (pendingPhotosByInst[step.id] || []).filter(
-            (x) => x.localId !== ph.localId
-          );
-          URL.revokeObjectURL(ph.url);
-          renderHivernageEditor();
-        });
-        photosEl.appendChild(fig);
-      });
-
-      const addBtn = document.createElement("button");
-      addBtn.type = "button";
-      addBtn.className = "hiv-add-photo";
-      addBtn.textContent = "＋ Photo";
-      addBtn.addEventListener("click", () => pickAndUploadPhoto(step.id));
-      photosEl.appendChild(addBtn);
+      appendStepPhotos($("[data-photos]", row), step);
 
       $(".hiv-step-remove", row)?.addEventListener("click", () => {
         if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
@@ -314,6 +447,48 @@
 
       root.appendChild(row);
     });
+  }
+
+  function syncHivernageMetaFromUi() {
+    const modeEl = document.querySelector('input[name="hivernage_mode"]:checked');
+    hivernageMeta.mode = modeEl?.value === "passif" ? "passif" : "actif";
+    hivernageMeta.commentaire = ($("#input-hivernage-commentaire")?.value || "").trim();
+  }
+
+  function applyHivernageModeUi() {
+    const isHiv = activeOption === "hivernage";
+    const extra = $("#extra-hivernage");
+    const addBloc = $("#bloc-add-option-step");
+    const comBloc = $("#bloc-hivernage-commentaire");
+    const hint = $("#option-panel-hint");
+    const modeHint = $("#hivernage-mode-hint");
+    if (extra) {
+      extra.hidden = !isHiv;
+      extra.style.display = isHiv ? "" : "none";
+    }
+    if (!isHiv) {
+      if (addBloc) addBloc.hidden = false;
+      if (comBloc) comBloc.hidden = true;
+      return;
+    }
+    const passif = hivernageMeta.mode === "passif";
+    if (addBloc) addBloc.hidden = passif;
+    if (comBloc) comBloc.hidden = false;
+    const comInput = $("#input-hivernage-commentaire");
+    if (comInput) comInput.value = hivernageMeta.commentaire || "";
+    document.querySelectorAll('input[name="hivernage_mode"]').forEach((r) => {
+      r.checked = r.value === hivernageMeta.mode;
+    });
+    if (hint) {
+      hint.textContent = passif
+        ? "Coche les étapes concernées. Les lignes indentées sont des sous-réponses de la vidange hydraulique. Photos et commentaire possibles."
+        : "Hivernage actif : ajoute des lignes libres + photos, et un commentaire si besoin.";
+    }
+    if (modeHint) {
+      modeHint.textContent = passif
+        ? "Passif : sélectionne les éléments de la liste (sous-réponses sous la vidange hydraulique)."
+        : "Actif : lignes libres + photos.";
+    }
   }
 
   async function uploadPhotoFile(clientId, instructionId, file) {
@@ -439,8 +614,25 @@
       checklist_hivernage: collectHivernageFromEditor(),
       options_checklists: (() => {
         syncActiveOptionFromEditor();
+        syncHivernageMetaFromUi();
         const out = {};
         OPTION_KEYS.forEach((k) => {
+          if (k === "hivernage") {
+            out.hivernage = {
+              mode: hivernageMeta.mode,
+              commentaire: hivernageMeta.commentaire || "",
+              steps: (optionsSteps.hivernage || []).map((s) => ({
+                id: s.id,
+                label: (s.label || "").trim(),
+                parent_id: s.parent_id || null,
+                selected:
+                  hivernageMeta.mode === "passif"
+                    ? !!s.selected
+                    : !!(s.label || "").trim(),
+              })).filter((s) => s.label),
+            };
+            return;
+          }
           out[k] = (optionsSteps[k] || [])
             .map((s) => ({ id: s.id, label: (s.label || "").trim() }))
             .filter((s) => s.label);
@@ -465,7 +657,8 @@
     try {
       const res = await api(`/api/clients/${clientId}/photos`);
       (res.photos || []).forEach((ph) => {
-        const iid = ph.instruction_id;
+        let iid = ph.instruction_id;
+        if (iid === "vh_pomme") iid = "vh_pompe";
         if (!hivernagePhotosByInst[iid]) hivernagePhotosByInst[iid] = [];
         hivernagePhotosByInst[iid].push(ph);
       });
@@ -611,6 +804,7 @@
     delete $("#btn-submit-nouveau")?.dataset?.continueVisit;
     clearPendingPhotos();
     optionsSteps = emptyOptionsSteps();
+    hivernageMeta = { mode: "actif", commentaire: "" };
     hivernagePhotosByInst = {};
     activeOption = null;
     const chkHiv = $("#chk-piscine-hivernee");
@@ -654,6 +848,10 @@
     });
     const stepsBloc = $("#bloc-option-steps");
     if (stepsBloc) stepsBloc.hidden = false;
+    const addBloc = $("#bloc-add-option-step");
+    if (addBloc) addBloc.hidden = false;
+    const comBloc = $("#bloc-hivernage-commentaire");
+    if (comBloc) comBloc.hidden = true;
     refreshOptionButtonLabels();
   }
 
@@ -671,22 +869,32 @@
     if (extraCompte) {
       const showCompte = key === "compte";
       extraCompte.hidden = !showCompte;
-      // Sécurité : le display:grid CSS ne doit pas réafficher le bloc compte ailleurs
       extraCompte.style.display = showCompte ? "" : "none";
     }
     const stepsBloc = $("#bloc-option-steps");
     if (stepsBloc) stepsBloc.hidden = key === "compte";
     if (key === "compte") {
+      const extraHiv = $("#extra-hivernage");
+      if (extraHiv) {
+        extraHiv.hidden = true;
+        extraHiv.style.display = "none";
+      }
       syncBlocCompte();
     } else {
       const blocCompte = $("#bloc-compte");
       if (blocCompte) blocCompte.hidden = true;
       const hint = $("#option-panel-hint");
       if (hint) hint.textContent = OPTION_HINTS[key] || "Ajoute des lignes d’information.";
-      // Première ouverture vide : une ligne prête à remplir
-      if (!(optionsSteps[key] || []).length) {
+      if (key === "hivernage") {
+        if (hivernageMeta.mode === "passif") {
+          ensurePassifHivernageSteps();
+        } else if (!(optionsSteps.hivernage || []).length) {
+          optionsSteps.hivernage = [{ id: newInstructionId(), label: "", photos: [] }];
+        }
+      } else if (!(optionsSteps[key] || []).length) {
         optionsSteps[key] = [{ id: newInstructionId(), label: "", photos: [] }];
       }
+      applyHivernageModeUi();
       renderOptionStepsEditor();
     }
     refreshOptionButtonLabels();
@@ -818,16 +1026,17 @@
     clearPendingPhotos();
     const opts = client.options_checklists || {};
     optionsSteps = emptyOptionsSteps();
+    const hivCfg =
+      client.hivernage_config ||
+      (opts.hivernage && !Array.isArray(opts.hivernage) ? opts.hivernage : null) ||
+      {};
+    hivernageMeta = {
+      mode: hivCfg.mode === "passif" ? "passif" : "actif",
+      commentaire: String(hivCfg.commentaire || "").trim(),
+    };
     OPTION_KEYS.forEach((k) => {
+      if (k === "hivernage") return;
       const raw = opts[k];
-      optionsSteps[k] = normalizeHivernageSteps(
-        Array.isArray(raw) && raw.length
-          ? raw
-          : k === "hivernage"
-            ? client.checklist_hivernage || []
-            : []
-      ).map((s) => ({ ...s, label: s.label || "" }));
-      // normalize filters empty labels — re-add with empty allowed for edit UI from objects
       if (Array.isArray(raw)) {
         optionsSteps[k] = raw
           .map((item) => {
@@ -844,8 +1053,58 @@
           .filter(Boolean);
       }
     });
-    if (!optionsSteps.hivernage.length && client.checklist_hivernage) {
-      optionsSteps.hivernage = normalizeHivernageSteps(client.checklist_hivernage);
+    const hivStepsRaw = Array.isArray(hivCfg.steps)
+      ? hivCfg.steps
+      : Array.isArray(opts.hivernage)
+        ? opts.hivernage
+        : client.checklist_hivernage || [];
+    if (hivernageMeta.mode === "passif") {
+      const hasSelectedFlag = hivStepsRaw.some(
+        (s) => s && typeof s === "object" && "selected" in s
+      );
+      const selectedIds = new Set();
+      const selectedLabels = new Set();
+      hivStepsRaw.forEach((s) => {
+        if (!s) return;
+        const lab = String(
+          (typeof s === "object" ? s.label || s.texte : s) || ""
+        )
+          .trim()
+          .toLowerCase();
+        const iid = typeof s === "object" ? String(s.id || "").trim() : "";
+        const isOn = hasSelectedFlag
+          ? !!(typeof s === "object" && s.selected)
+          : true;
+        if (!isOn) return;
+        if (iid) selectedIds.add(iid);
+        if (lab) selectedLabels.add(lab);
+      });
+      // Ancien id/libellé « pomme » → « pompe »
+      if (selectedIds.has("vh_pomme")) selectedIds.add("vh_pompe");
+      if (selectedLabels.has("pomme de filtration")) {
+        selectedLabels.add("pompe de filtration");
+      }
+      ensurePassifHivernageSteps();
+      optionsSteps.hivernage.forEach((s) => {
+        s.selected =
+          selectedIds.has(s.id) ||
+          selectedLabels.has((s.label || "").toLowerCase());
+      });
+    } else {
+      optionsSteps.hivernage = hivStepsRaw
+        .map((item) => {
+          if (item && typeof item === "object") {
+            return {
+              id: String(item.id || "").trim() || newInstructionId(),
+              label: String(item.label || item.texte || "").trim(),
+              photos: [],
+              selected: true,
+            };
+          }
+          const label = String(item || "").trim();
+          return label ? { id: newInstructionId(), label, photos: [], selected: true } : null;
+        })
+        .filter(Boolean);
     }
     closeOptionPanel();
     refreshOptionButtonLabels();
@@ -980,6 +1239,7 @@
 
   $("#btn-add-option-step")?.addEventListener("click", () => {
     if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
+    if (activeOption === "hivernage" && hivernageMeta.mode === "passif") return;
     syncActiveOptionFromEditor();
     const labeled = (optionsSteps[activeOption] || []).filter((s) => (s.label || "").trim());
     const emptyKept = (optionsSteps[activeOption] || []).filter(
@@ -994,6 +1254,37 @@
     refreshOptionButtonLabels();
     const inputs = $$("#option-steps-editor input[type='text']");
     inputs[inputs.length - 1]?.focus();
+  });
+
+  document.querySelectorAll('input[name="hivernage_mode"]').forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (activeOption !== "hivernage") return;
+      const prevMode = hivernageMeta.mode;
+      syncHivernageMetaFromUi();
+      if (hivernageMeta.mode === "passif") {
+        ensurePassifHivernageSteps();
+      } else if (prevMode === "passif") {
+        const selected = (optionsSteps.hivernage || [])
+          .filter((s) => s.selected && (s.label || "").trim())
+          .map((s) => ({
+            id: s.id,
+            label: s.label,
+            photos: [],
+            selected: true,
+          }));
+        optionsSteps.hivernage = selected.length
+          ? selected
+          : [{ id: newInstructionId(), label: "", photos: [] }];
+      }
+      applyHivernageModeUi();
+      renderOptionStepsEditor();
+      refreshOptionButtonLabels();
+    });
+  });
+
+  $("#input-hivernage-commentaire")?.addEventListener("input", () => {
+    hivernageMeta.commentaire = ($("#input-hivernage-commentaire")?.value || "").trim();
+    refreshOptionButtonLabels();
   });
 
   $$("#option-grid .option-btn").forEach((btn) => {
