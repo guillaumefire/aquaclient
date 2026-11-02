@@ -104,7 +104,15 @@
   let hivernagePhotosByInst = {};
   /** @type {Record<string, {localId:string,file:File,url:string}[]>} photos locales avant création client */
   let pendingPhotosByInst = {};
-  let dashFiltre = "tous";
+  /** @type {null|"clients"|"impayes"|"hivernees"|"en_hivernage"} */
+  let dashFiltre = null;
+  /** @type {Array|null} */
+  let dashClientsCache = null;
+  /** @type {Array|null} */
+  let listeClientsCache = null;
+  let listeSearchQ = "";
+  let fourniSearchQ = "";
+  let fourniClientId = null;
 
   function emptyOptionsSteps() {
     return { ouverture: [], local_technique: [], hivernage: [], entretien: [] };
@@ -1430,29 +1438,41 @@
     }
   }
 
-  async function chargerListe() {
+  function matchClientSearch(c, q) {
+    if (!q) return true;
+    const hay = `${c.prenom || ""} ${c.nom || ""} ${c.adresse || ""} ${c.email || ""} ${c.telephone || ""}`
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    const needle = q
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    return needle.split(/\s+/).filter(Boolean).every((part) => hay.includes(part));
+  }
+
+  function renderListeClients(clients) {
     const ul = $("#liste-clients");
     const all = $("#chk-select-all");
     if (all) {
       all.checked = false;
       all.indeterminate = false;
     }
-    ul.innerHTML = '<li class="empty">Chargement…</li>';
-    try {
-      const clients = await api("/api/clients");
-      ul.innerHTML = "";
-      refreshFooter();
-      if (!clients.length) {
-        ul.innerHTML = '<li class="empty">Aucun client</li>';
-        syncSelectionToolbar();
-        return;
-      }
-      clients.forEach((c) => {
-        const li = document.createElement("li");
-        li.className = "pick-item pick-item--row";
-        const typeLabel =
-          c.type_entretien === "entretien_complet" ? "Complet" : "Classique";
-        li.innerHTML = `
+    ul.innerHTML = "";
+    const filtered = (clients || []).filter((c) => matchClientSearch(c, listeSearchQ));
+    if (!filtered.length) {
+      ul.innerHTML = `<li class="empty">${
+        listeSearchQ ? "Aucun client pour cette recherche." : "Aucun client"
+      }</li>`;
+      syncSelectionToolbar();
+      return;
+    }
+    filtered.forEach((c) => {
+      const li = document.createElement("li");
+      li.className = "pick-item pick-item--row";
+      const typeLabel =
+        c.type_entretien === "entretien_complet" ? "Complet" : "Classique";
+      li.innerHTML = `
           <label class="pick-check">
             <input type="checkbox" data-select-client value="${escapeHtml(String(c.id))}" />
             <span class="visually-hidden">Sélectionner</span>
@@ -1464,23 +1484,39 @@
           </button>
           <button type="button" class="btn btn--ghost pick-edit" aria-label="Modifier">✎</button>
         `;
-        li.querySelector(".pick-main").addEventListener("click", () => allerChezClient(c));
-        li.querySelector(".pick-edit").addEventListener("click", (ev) => {
-          ev.stopPropagation();
-          ouvrirEditionClient(c);
-        });
-        li.querySelector("input[data-select-client]").addEventListener("change", () => {
-          li.classList.toggle("is-selected", li.querySelector("input").checked);
-          syncSelectionToolbar();
-        });
-        ul.appendChild(li);
+      li.querySelector(".pick-main").addEventListener("click", () => allerChezClient(c));
+      li.querySelector(".pick-edit").addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        ouvrirEditionClient(c);
       });
-      syncSelectionToolbar();
+      li.querySelector("input[data-select-client]").addEventListener("change", () => {
+        li.classList.toggle("is-selected", li.querySelector("input").checked);
+        syncSelectionToolbar();
+      });
+      ul.appendChild(li);
+    });
+    syncSelectionToolbar();
+  }
+
+  async function chargerListe() {
+    const ul = $("#liste-clients");
+    ul.innerHTML = '<li class="empty">Chargement…</li>';
+    try {
+      const clients = await api("/api/clients");
+      listeClientsCache = clients;
+      refreshFooter();
+      renderListeClients(clients);
     } catch (err) {
+      listeClientsCache = null;
       ul.innerHTML = `<li class="empty">${escapeHtml(err.message)}</li>`;
       syncSelectionToolbar();
     }
   }
+
+  $("#input-liste-search")?.addEventListener("input", (ev) => {
+    listeSearchQ = (ev.target.value || "").trim();
+    if (listeClientsCache) renderListeClients(listeClientsCache);
+  });
 
   $("#chk-select-all")?.addEventListener("change", (e) => {
     const on = e.target.checked;
@@ -1520,88 +1556,151 @@
     chargerListe();
   });
 
-  async function chargerDashboard() {
+  function dashFiltreLabel(key) {
+    return (
+      {
+        clients: "Clients",
+        impayes: "Factures à payer",
+        hivernees: "Hivernées",
+        en_hivernage: "En hivernage",
+      }[key] || "Clients"
+    );
+  }
+
+  function filterDashRows(rows, key) {
+    if (key === "impayes") return rows.filter((c) => c.a_impaye);
+    if (key === "hivernees") return rows.filter((c) => c.piscine_hivernee);
+    if (key === "en_hivernage")
+      return rows.filter((c) => c.hivernage_en_cours && !c.piscine_hivernee);
+    return rows;
+  }
+
+  function renderDashDetail() {
+    const detail = $("#dash-detail");
     const status = $("#dash-status");
     const ul = $("#liste-dashboard");
-    const summary = $("#dash-summary");
-    if (status) status.textContent = "Chargement…";
+    if (!dashFiltre || !dashClientsCache) {
+      if (detail) detail.hidden = true;
+      return;
+    }
+    if (detail) detail.hidden = false;
+    const rows = filterDashRows(dashClientsCache, dashFiltre);
+    if (status) {
+      status.textContent = rows.length
+        ? `${dashFiltreLabel(dashFiltre)} — ${rows.length} client${rows.length > 1 ? "s" : ""}`
+        : `Aucun client · ${dashFiltreLabel(dashFiltre)}`;
+    }
     if (ul) ul.innerHTML = "";
+    rows.forEach((c) => {
+      const li = document.createElement("li");
+      li.className = "dash-item";
+      const flags = [];
+      if (c.a_impaye) {
+        flags.push(
+          `<span class="dash-flag dash-flag--debt">${c.factures_impayees} impayée${
+            c.factures_impayees > 1 ? "s" : ""
+          }</span>`
+        );
+      }
+      if (c.piscine_hivernee) {
+        flags.push(`<span class="dash-flag dash-flag--ice">Hivernée</span>`);
+      } else if (c.hivernage_en_cours) {
+        flags.push(`<span class="dash-flag dash-flag--ice">En hivernage</span>`);
+      }
+      li.innerHTML =
+        `<button type="button" class="dash-main" data-id="${c.id}">` +
+        `<strong>${escapeHtml(c.label)}</strong>` +
+        `<span class="muted">${escapeHtml(c.adresse || "")}</span>` +
+        (flags.length ? `<span class="dash-flags">${flags.join("")}</span>` : "") +
+        `</button>` +
+        `<label class="dash-toggle" title="Statut hivernage">` +
+        `<input type="checkbox" data-hiv-id="${c.id}" ${c.piscine_hivernee ? "checked" : ""} />` +
+        `<span>Hivernée</span></label>`;
+      $(".dash-main", li)?.addEventListener("click", async () => {
+        try {
+          const full = await api(`/api/clients/${c.id}`);
+          clientActif = full;
+          await ouvrirEditionClient(full);
+        } catch (err) {
+          if (status) status.textContent = err.message;
+        }
+      });
+      $("input[data-hiv-id]", li)?.addEventListener("change", async (ev) => {
+        const on = !!ev.target.checked;
+        try {
+          await api(`/api/clients/${c.id}/hivernage-statut`, {
+            method: "PATCH",
+            body: JSON.stringify({ piscine_hivernee: on }),
+          });
+          await chargerDashboard({ keepFiltre: true });
+        } catch (err) {
+          ev.target.checked = !on;
+          if (status) status.textContent = err.message;
+        }
+      });
+      ul?.appendChild(li);
+    });
+  }
+
+  async function chargerDashboard(opts = {}) {
+    const summary = $("#dash-summary");
+    const detail = $("#dash-detail");
+    if (!opts.keepFiltre) {
+      dashFiltre = null;
+      if (detail) detail.hidden = true;
+    }
+    if (summary) summary.innerHTML = `<p class="muted">Chargement…</p>`;
     try {
       const data = await api("/api/dashboard");
+      dashClientsCache = data.clients || [];
+      const enCours = data.hivernages_en_cours || 0;
+      const tiles = [
+        { key: "clients", value: data.total_clients, label: "Clients", cls: "" },
+        {
+          key: "impayes",
+          value: data.factures_impayees_total,
+          label: "Factures à payer",
+          cls: "dash-stat--warn",
+        },
+        {
+          key: "hivernees",
+          value: data.piscines_hivernees,
+          label: "Hivernées",
+          cls: "dash-stat--ok",
+        },
+        {
+          key: "en_hivernage",
+          value: enCours,
+          label: "En hivernage",
+          cls: "dash-stat--ice",
+        },
+      ];
       if (summary) {
-        const enCours = data.hivernages_en_cours || 0;
-        summary.innerHTML =
-          `<div class="dash-stat"><strong>${data.total_clients}</strong><span>Clients</span></div>` +
-          `<div class="dash-stat dash-stat--warn"><strong>${data.factures_impayees_total}</strong><span>Factures à payer</span></div>` +
-          `<div class="dash-stat dash-stat--ok"><strong>${data.piscines_hivernees}</strong><span>Hivernées</span></div>` +
-          `<div class="dash-stat"><strong>${enCours}</strong><span>En hivernage</span></div>`;
-      }
-      let rows = data.clients || [];
-      if (dashFiltre === "impayes") rows = rows.filter((c) => c.a_impaye);
-      else if (dashFiltre === "hivernees") rows = rows.filter((c) => c.piscine_hivernee);
-      else if (dashFiltre === "actives")
-        rows = rows.filter((c) => !c.piscine_hivernee && !c.hivernage_en_cours);
-
-      if (status) {
-        status.textContent = rows.length
-          ? `${rows.length} client${rows.length > 1 ? "s" : ""}`
-          : "Aucun client pour ce filtre.";
-      }
-      rows.forEach((c) => {
-        const li = document.createElement("li");
-        li.className = "dash-item";
-        const flags = [];
-        if (c.a_impaye) {
-          flags.push(
-            `<span class="dash-flag dash-flag--debt">${c.factures_impayees} impayée${
-              c.factures_impayees > 1 ? "s" : ""
-            }</span>`
-          );
-        } else {
-          flags.push(`<span class="dash-flag dash-flag--ok">Factures OK</span>`);
-        }
-        if (c.piscine_hivernee) {
-          flags.push(`<span class="dash-flag dash-flag--ice">Hivernée</span>`);
-        } else if (c.hivernage_en_cours) {
-          flags.push(`<span class="dash-flag dash-flag--ice">En hivernage</span>`);
-        } else {
-          flags.push(`<span class="dash-flag">En eau</span>`);
-        }
-        li.innerHTML =
-          `<button type="button" class="dash-main" data-id="${c.id}">` +
-          `<strong>${escapeHtml(c.label)}</strong>` +
-          `<span class="muted">${escapeHtml(c.adresse || "")}</span>` +
-          `<span class="dash-flags">${flags.join("")}</span>` +
-          `</button>` +
-          `<label class="dash-toggle" title="Statut hivernage">` +
-          `<input type="checkbox" data-hiv-id="${c.id}" ${c.piscine_hivernee ? "checked" : ""} />` +
-          `<span>Hivernée</span></label>`;
-        $(".dash-main", li)?.addEventListener("click", async () => {
-          try {
-            const full = await api(`/api/clients/${c.id}`);
-            clientActif = full;
-            await ouvrirEditionClient(full);
-          } catch (err) {
-            setFeedback(status, err.message, false);
-          }
+        summary.innerHTML = "";
+        tiles.forEach((t) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className =
+            "dash-stat dash-stat--btn" +
+            (t.cls ? ` ${t.cls}` : "") +
+            (dashFiltre === t.key ? " is-on" : "");
+          btn.dataset.dashFiltre = t.key;
+          btn.innerHTML = `<strong>${t.value}</strong><span>${escapeHtml(t.label)}</span>`;
+          btn.addEventListener("click", () => {
+            dashFiltre = t.key;
+            $$("#dash-summary .dash-stat--btn").forEach((b) =>
+              b.classList.toggle("is-on", b.dataset.dashFiltre === t.key)
+            );
+            renderDashDetail();
+          });
+          summary.appendChild(btn);
         });
-        $("input[data-hiv-id]", li)?.addEventListener("change", async (ev) => {
-          const on = !!ev.target.checked;
-          try {
-            await api(`/api/clients/${c.id}/hivernage-statut`, {
-              method: "PATCH",
-              body: JSON.stringify({ piscine_hivernee: on }),
-            });
-            await chargerDashboard();
-          } catch (err) {
-            ev.target.checked = !on;
-            setFeedback(status, err.message, false);
-          }
-        });
-        ul?.appendChild(li);
-      });
+      }
+      if (opts.keepFiltre && dashFiltre) renderDashDetail();
     } catch (err) {
-      if (status) status.textContent = err.message || "Erreur dashboard";
+      dashClientsCache = null;
+      if (summary)
+        summary.innerHTML = `<p class="muted">${escapeHtml(err.message || "Erreur dashboard")}</p>`;
     }
   }
 
@@ -1610,14 +1709,11 @@
     chargerDashboard();
   });
 
-  $$("#dash-filtres [data-dash-filtre]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      dashFiltre = btn.dataset.dashFiltre || "tous";
-      $$("#dash-filtres [data-dash-filtre]").forEach((b) =>
-        b.classList.toggle("is-on", b === btn)
-      );
-      chargerDashboard();
-    });
+  $("#btn-dash-back")?.addEventListener("click", () => {
+    dashFiltre = null;
+    const detail = $("#dash-detail");
+    if (detail) detail.hidden = true;
+    $$("#dash-summary .dash-stat--btn").forEach((b) => b.classList.remove("is-on"));
   });
 
   let carteMap = null;
@@ -1723,11 +1819,13 @@
       const data = await api("/api/agenda?jours=60");
       const passages = data.passages || [];
       if (!passages.length) {
-        status.textContent = "Aucun passage planifié. Définis fréquence + date sur un entretien complet.";
+        status.textContent =
+          "Aucun passage planifié. Définis fréquence + date sur un entretien complet.";
         ul.innerHTML = '<li class="empty">—</li>';
         return;
       }
-      status.textContent = `${passages.length} passage${passages.length > 1 ? "s" : ""} à venir`;
+      const doneN = passages.filter((p) => p.termine).length;
+      status.textContent = `${passages.length} passage${passages.length > 1 ? "s" : ""} · ${doneN} terminé${doneN > 1 ? "s" : ""}`;
       let lastDate = "";
       passages.forEach((p) => {
         if (p.date !== lastDate) {
@@ -1738,16 +1836,40 @@
           ul.appendChild(head);
         }
         const li = document.createElement("li");
-        li.className = "pick-item pick-item--row";
+        const done = !!p.termine;
+        li.className =
+          "agenda-item" + (done ? " agenda-item--done" : " agenda-item--todo");
         const freq = labelFrequence(p.frequence);
         li.innerHTML = `
-          <button type="button" class="pick-main">
+          <button type="button" class="pick-main agenda-main">
             <strong>${escapeHtml(p.client.prenom)} ${escapeHtml(p.client.nom)}</strong>
             <span class="meta">${escapeHtml(p.client.adresse)}</span>
             <span class="meta">${escapeHtml(freq)}</span>
           </button>
+          <button type="button" class="agenda-status-btn" aria-pressed="${done}">
+            ${done ? "Terminé" : "À faire"}
+          </button>
         `;
-        li.querySelector(".pick-main").addEventListener("click", () => allerChezClient(p.client));
+        li.querySelector(".agenda-main")?.addEventListener("click", () =>
+          allerChezClient(p.client)
+        );
+        li.querySelector(".agenda-status-btn")?.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          const next = !done;
+          try {
+            await api("/api/agenda/passage", {
+              method: "PATCH",
+              body: JSON.stringify({
+                client_id: p.client.id,
+                date: p.date,
+                termine: next,
+              }),
+            });
+            await afficherAgenda();
+          } catch (err) {
+            alert(err.message || "Mise à jour impossible.");
+          }
+        });
         ul.appendChild(li);
       });
     } catch (err) {
@@ -1772,15 +1894,31 @@
     });
 
     try {
-      const data = await api(`/api/factures?filtre=${encodeURIComponent(factureFiltre)}`);
+      const params = new URLSearchParams({ filtre: factureFiltre });
+      if (fourniClientId) params.set("client_id", String(fourniClientId));
+      else if (fourniSearchQ) params.set("q", fourniSearchQ);
+      const data = await api(`/api/factures?${params.toString()}`);
       const items = data.factures || [];
       if (!items.length) {
-        status.textContent = "Aucune facture pour ce filtre.";
+        status.textContent = fourniSearchQ
+          ? "Aucune fourniture pour ce client."
+          : "Aucune fourniture pour ce filtre.";
         ul.innerHTML = '<li class="empty">—</li>';
         return;
       }
-      status.textContent = `${items.length} facture${items.length > 1 ? "s" : ""}`;
+      status.textContent = `${items.length} fourniture${items.length > 1 ? "s" : ""}`;
+      let lastClient = null;
       items.forEach((f) => {
+        const label = f.client_label || "";
+        if (fourniSearchQ || fourniClientId) {
+          if (label !== lastClient) {
+            lastClient = label;
+            const head = document.createElement("li");
+            head.className = "agenda-day";
+            head.textContent = label || "Client";
+            ul.appendChild(head);
+          }
+        }
         const li = document.createElement("li");
         li.className = "facture-item";
         const envoyee = f.envoyee === "oui";
@@ -1788,10 +1926,16 @@
         const dates = f.date_ref
           ? `${formatDateFr(f.date)} · ${formatDateFr(f.date_ref)}`
           : formatDateFr(f.date);
+        const grouped = !!(fourniSearchQ || fourniClientId);
+        const line = `${f.quantite} × ${f.description}`;
         li.innerHTML = `
           <div class="facture-main">
-            <strong>${escapeHtml(f.client_label)}</strong>
-            <span class="hist-text">${escapeHtml(String(f.quantite))} × ${escapeHtml(f.description)}</span>
+            <strong>${escapeHtml(grouped ? line : f.client_label)}</strong>
+            ${
+              grouped
+                ? ""
+                : `<span class="hist-text">${escapeHtml(line)}</span>`
+            }
             <span class="meta">${escapeHtml(dates)}</span>
           </div>
           <div class="facture-flags">
@@ -1823,9 +1967,17 @@
         });
       });
     } catch (err) {
-      status.textContent = err.message || "Impossible de charger les factures.";
+      status.textContent = err.message || "Impossible de charger les fournitures.";
     }
   }
+
+  let fourniSearchTimer = null;
+  $("#input-fourni-search")?.addEventListener("input", (ev) => {
+    fourniSearchQ = (ev.target.value || "").trim();
+    fourniClientId = null;
+    clearTimeout(fourniSearchTimer);
+    fourniSearchTimer = setTimeout(() => afficherFactures(factureFiltre), 220);
+  });
 
   $("#btn-factures")?.addEventListener("click", () => afficherFactures("toutes"));
   $$("#factures-filtres .filtre-chip").forEach((btn) => {

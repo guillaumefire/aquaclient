@@ -56,8 +56,8 @@
           <button type="button" class="home-link" id="btn-liste">
             <span class="home-link-ico" aria-hidden="true">≡</span>
             <span class="home-link-text">
-              <span class="home-link-label">Liste</span>
-              <span class="home-link-hint">Clients</span>
+              <span class="home-link-label">Clients</span>
+              <span class="home-link-hint">Tous les dossiers</span>
             </span>
           </button>
           <button type="button" class="home-link" id="btn-carte">
@@ -77,8 +77,8 @@
           <button type="button" class="home-link" id="btn-factures">
             <span class="home-link-ico" aria-hidden="true">◫</span>
             <span class="home-link-text">
-              <span class="home-link-label">Factures</span>
-              <span class="home-link-hint">Suivi</span>
+              <span class="home-link-label">Fournitures</span>
+              <span class="home-link-hint">Factures & suivi</span>
             </span>
           </button>
           <button type="button" class="home-link home-link--wide" id="btn-nouveau">
@@ -131,7 +131,7 @@
       </div>
       <div class="actions">
         <button type="button" class="btn btn--primary" id="btn-utiliser-proche" hidden>Utiliser le plus proche</button>
-        <button type="button" class="btn btn--ghost" id="btn-liste-depuis-none">Liste clients</button>
+        <button type="button" class="btn btn--ghost" id="btn-liste-depuis-none">Clients</button>
         <button type="button" class="btn btn--ghost" data-goto="home">Retour</button>
         <button type="button" class="btn btn--ghost" id="btn-nouveau-depuis-none">Nouveau client</button>
       </div>
@@ -141,21 +141,22 @@
       <button type="button" class="back" data-goto="home">← Accueil</button>
       <p class="eyebrow">Vue d’ensemble</p>
       <h2 class="screen-title">Dashboard</h2>
-      <div class="dash-summary" id="dash-summary" aria-live="polite"></div>
-      <div class="filtre-row" id="dash-filtres" role="tablist" aria-label="Filtres dashboard">
-        <button type="button" class="filtre-chip is-on" data-dash-filtre="tous">Tous</button>
-        <button type="button" class="filtre-chip" data-dash-filtre="impayes">Impayés</button>
-        <button type="button" class="filtre-chip" data-dash-filtre="hivernees">Hivernées</button>
-        <button type="button" class="filtre-chip" data-dash-filtre="actives">En eau</button>
+      <div class="dash-summary" id="dash-summary" role="group" aria-label="Catégories"></div>
+      <div id="dash-detail" hidden>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-dash-back">← Catégories</button>
+        <p class="muted" id="dash-status"></p>
+        <ul class="list list--dashboard" id="liste-dashboard"></ul>
       </div>
-      <p class="muted" id="dash-status">Chargement…</p>
-      <ul class="list list--dashboard" id="liste-dashboard"></ul>
     </section>
 
     <section class="screen" id="screen-liste" data-screen>
       <button type="button" class="back" data-goto="home">← Accueil</button>
-      <p class="eyebrow">Tous les clients</p>
-      <h2 class="screen-title">Choisir un client</h2>
+      <p class="eyebrow">Tous les dossiers</p>
+      <h2 class="screen-title">Clients</h2>
+      <label class="field field--search">
+        <span class="visually-hidden">Rechercher un client</span>
+        <input type="search" id="input-liste-search" placeholder="Rechercher un client…" autocomplete="off" />
+      </label>
       <div class="liste-toolbar">
         <label class="toggle toggle--compact">
           <input type="checkbox" id="chk-select-all" />
@@ -187,9 +188,13 @@
     <section class="screen" id="screen-factures" data-screen>
       <button type="button" class="back" data-goto="home">← Accueil</button>
       <p class="eyebrow">Suivi</p>
-      <h2 class="screen-title">Factures</h2>
+      <h2 class="screen-title">Fournitures</h2>
+      <label class="field field--search">
+        <span class="visually-hidden">Rechercher un client</span>
+        <input type="search" id="input-fourni-search" placeholder="Rechercher un client…" autocomplete="off" />
+      </label>
       <p class="muted" id="factures-status">Chargement…</p>
-      <div class="filtre-row" id="factures-filtres" role="tablist" aria-label="Filtres factures">
+      <div class="filtre-row" id="factures-filtres" role="tablist" aria-label="Filtres fournitures">
         <button type="button" class="filtre-chip is-on" data-filtre="toutes">Toutes</button>
         <button type="button" class="filtre-chip" data-filtre="dernieres">Dernières</button>
         <button type="button" class="filtre-chip" data-filtre="non_envoyees">À envoyer</button>

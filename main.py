@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.9.0"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -49,6 +49,7 @@ VISITES_CSV = DATA_DIR / "visites.csv"
 FACTURES_LEGACY = DATA_DIR / "factures.csv"
 PHOTOS_META_CSV = DATA_DIR / "photos_clients.csv"
 PHOTOS_DIR = DATA_DIR / "photos"
+PASSAGES_STATUT_CSV = DATA_DIR / "passages_statut.csv"
 STATIC_DIR = Path(__file__).parent / "static"
 
 DATA_DIR.mkdir(exist_ok=True)
@@ -88,6 +89,7 @@ VISITE_FIELDS = [
     "id", "client_id", "date", "type", "checklist_json",
     "debut", "fin", "duree_minutes",
 ]
+PASSAGE_STATUT_FIELDS = ["id", "client_id", "date", "termine"]
 
 RAYON_RECHERCHE_M = 1000
 
@@ -277,6 +279,7 @@ def _migrate_visites_columns() -> None:
 
 _ensure_csv(NOTES_CSV, NOTE_FIELDS)
 _ensure_csv(ANALYSES_CSV, ANALYSE_FIELDS)
+_ensure_csv(PASSAGES_STATUT_CSV, PASSAGE_STATUT_FIELDS)
 _migrate_clients_columns()
 _migrate_fournitures()
 _migrate_hist_date_ref()
@@ -1025,10 +1028,11 @@ def detect_image_mime(data: bytes) -> str | None:
 
 
 def optimize_photo(data: bytes) -> tuple[bytes, int, int]:
-    """Redimensionne et convertit en WebP pour limiter l'espace Storage."""
-    from PIL import Image
+    """Redimensionne et convertit en WebP (orientation EXIF corrigée)."""
+    from PIL import Image, ImageOps
 
     img = Image.open(io.BytesIO(data))
+    img = ImageOps.exif_transpose(img) or img
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     elif img.mode == "L":
@@ -1045,6 +1049,59 @@ def optimize_photo(data: bytes) -> tuple[bytes, int, int]:
     img.save(buf, format="WEBP", quality=WEBP_QUALITY, method=6)
     ow, oh = img.size
     return buf.getvalue(), ow, oh
+
+
+def _passage_key(client_id: int, date: str) -> str:
+    return f"{int(client_id)}|{(date or '')[:10]}"
+
+
+def read_passages_statut() -> dict[str, bool]:
+    """Map client_id|YYYY-MM-DD → terminé."""
+    _ensure_csv(PASSAGES_STATUT_CSV, PASSAGE_STATUT_FIELDS)
+    out: dict[str, bool] = {}
+    for r in read_csv(PASSAGES_STATUT_CSV):
+        try:
+            cid = int(r.get("client_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        d = (r.get("date") or "").strip()[:10]
+        if not cid or not d:
+            continue
+        out[_passage_key(cid, d)] = from_bool_csv(r.get("termine", ""))
+    return out
+
+
+def set_passage_statut(client_id: int, date: str, termine: bool) -> dict[str, Any]:
+    d = (date or "").strip()[:10]
+    if not d or not parse_iso_date(d):
+        raise HTTPException(status_code=400, detail="Date de passage invalide.")
+    _ensure_csv(PASSAGES_STATUT_CSV, PASSAGE_STATUT_FIELDS)
+    rows = read_csv(PASSAGES_STATUT_CSV)
+    found = False
+    for r in rows:
+        try:
+            cid = int(r.get("client_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if cid == int(client_id) and (r.get("date") or "")[:10] == d:
+            r["termine"] = bool_csv(termine)
+            found = True
+            break
+    if not found:
+        next_id = 1
+        for r in rows:
+            try:
+                next_id = max(next_id, int(r.get("id") or 0) + 1)
+            except (TypeError, ValueError):
+                pass
+        rows.append({
+            "id": str(next_id),
+            "client_id": str(int(client_id)),
+            "date": d,
+            "termine": bool_csv(termine),
+        })
+    write_csv(PASSAGES_STATUT_CSV, PASSAGE_STATUT_FIELDS, rows)
+    return {"client_id": int(client_id), "date": d, "termine": bool(termine)}
 
 
 def photo_public(row: dict[str, Any]) -> dict[str, Any]:
@@ -2150,6 +2207,7 @@ def list_clients():
 def agenda_passages(jours: int = 60):
     """Agenda des passages planifiés (entretien complet)."""
     horizon = max(7, min(int(jours or 60), 180))
+    statut = read_passages_statut()
     events: list[dict[str, Any]] = []
     for r in read_csv(CLIENTS_CSV):
         client = row_client(r)
@@ -2165,6 +2223,7 @@ def agenda_passages(jours: int = 60):
             events.append({
                 "date": d,
                 "frequence": client["frequence_passage"],
+                "termine": bool(statut.get(_passage_key(client["id"], d), False)),
                 "client": {
                     "id": client["id"],
                     "nom": client["nom"],
@@ -2175,6 +2234,21 @@ def agenda_passages(jours: int = 60):
             })
     events.sort(key=lambda e: (e["date"], e["client"]["nom"]))
     return {"passages": events}
+
+
+class PassageStatutUpdate(BaseModel):
+    client_id: int
+    date: str
+    termine: bool
+
+
+@app.patch("/api/agenda/passage")
+def patch_agenda_passage(body: PassageStatutUpdate):
+    """Marque un passage agenda comme terminé ou à faire."""
+    rows = read_csv(CLIENTS_CSV)
+    if not any(int(r.get("id") or 0) == int(body.client_id) for r in rows):
+        raise HTTPException(status_code=404, detail="Client introuvable")
+    return set_passage_statut(body.client_id, body.date, body.termine)
 
 
 @app.post("/api/clients")
@@ -3153,10 +3227,16 @@ def patch_hivernage_statut(client_id: int, body: HivernageStatutUpdate):
 
 
 @app.get("/api/factures")
-def liste_factures(filtre: str = "toutes", limit: int = 0):
+def liste_factures(
+    filtre: str = "toutes",
+    limit: int = 0,
+    client_id: int | None = None,
+    q: str = "",
+):
     """
-    Liste des factures (fournitures) avec filtres :
+    Liste des fournitures (factures) avec filtres :
     toutes | dernieres | envoyees | non_envoyees | payees | non_payees
+    + client_id / q (recherche nom client).
     """
     clients_by_id = {
         int(c["id"]): c for c in read_csv(CLIENTS_CSV) if str(c.get("id", "")).isdigit()
@@ -3164,6 +3244,33 @@ def liste_factures(filtre: str = "toutes", limit: int = 0):
     rows = [_facture_enrichie(r, clients_by_id) for r in read_csv(FOURNITURES_CSV)]
     # Plus récentes d'abord
     rows.sort(key=lambda r: (r.get("date") or "", int(r["id"]) if isinstance(r["id"], int) else 0), reverse=True)
+
+    if client_id is not None:
+        rows = [r for r in rows if int(r.get("client_id") or 0) == int(client_id)]
+
+    query = (q or "").strip().lower()
+    if query:
+        rows = [
+            r
+            for r in rows
+            if query in (r.get("client_label") or "").lower()
+            or query in (r.get("description") or "").lower()
+        ]
+        # Regrouper par client, dates décroissantes
+        by_client: dict[str, list] = {}
+        for r in rows:
+            by_client.setdefault(r.get("client_label") or "", []).append(r)
+        rows = []
+        for label in sorted(by_client.keys(), key=lambda s: s.lower()):
+            chunk = by_client[label]
+            chunk.sort(
+                key=lambda r: (
+                    r.get("date") or "",
+                    int(r["id"]) if isinstance(r.get("id"), int) else 0,
+                ),
+                reverse=True,
+            )
+            rows.extend(chunk)
 
     f = (filtre or "toutes").strip().lower()
     if f in {"envoyees", "envoyee", "envoyées", "envoyée"}:
@@ -3185,6 +3292,8 @@ def liste_factures(filtre: str = "toutes", limit: int = 0):
         "filtre": f,
         "total": len(rows),
         "factures": rows,
+        "client_id": client_id,
+        "q": query,
     }
 
 
