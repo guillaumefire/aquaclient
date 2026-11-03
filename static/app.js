@@ -99,6 +99,11 @@
   };
   /** @type {{mode:"actif"|"passif", commentaire:string}} */
   let hivernageMeta = { mode: "actif", commentaire: "" };
+  /** Mémoires séparées : basculer actif↔passif ne mélange plus les choix */
+  /** @type {{id:string,label:string,commentaire?:string,photos?:Array,selected?:boolean}[]} */
+  let hivernageActifSteps = [];
+  /** @type {{id:string,label:string,parent_id?:string|null,selected:boolean,commentaire:string,photos?:Array}[]|null} */
+  let hivernagePassifSteps = null;
   let activeOption = null;
   /** @type {Record<string, Array>} photos serveur par instruction_id */
   let hivernagePhotosByInst = {};
@@ -143,12 +148,9 @@
     return out;
   }
 
-  function ensurePassifHivernageSteps() {
-    const byId = Object.fromEntries(
-      (optionsSteps.hivernage || []).map((s) => [s.id, s])
-    );
-    optionsSteps.hivernage = flatPassifTemplate().map((tpl) => {
-      // Alias id historique (typo « pomme »)
+  function mergePassifFromPrev(prevList) {
+    const byId = Object.fromEntries((prevList || []).map((s) => [s.id, s]));
+    return flatPassifTemplate().map((tpl) => {
       const prev =
         byId[tpl.id] ||
         (tpl.id === "vh_pompe" ? byId.vh_pomme : null);
@@ -161,6 +163,137 @@
     });
   }
 
+  function ensurePassifHivernageSteps() {
+    const source =
+      hivernagePassifSteps ||
+      (hivernageMeta.mode === "passif" ? optionsSteps.hivernage : null) ||
+      [];
+    optionsSteps.hivernage = mergePassifFromPrev(source);
+    hivernagePassifSteps = optionsSteps.hivernage.map((s) => ({ ...s }));
+  }
+
+  /** Lit le DOM passif → mémoire (sans reset préalable qui écraserait les coches). */
+  function readPassifDomIntoMemory() {
+    const root = $("#option-steps-editor");
+    const rows = root ? $$(".hiv-step--passif", root) : [];
+    if (!rows.length) return false;
+    const base = mergePassifFromPrev(hivernagePassifSteps || optionsSteps.hivernage || []);
+    const byId = Object.fromEntries(base.map((s) => [s.id, { ...s }]));
+    rows.forEach((row) => {
+      const id = row.dataset.id;
+      if (!id || !byId[id]) return;
+      const chk = $("input[type='checkbox']", row);
+      const ta = $("textarea[data-step-com]", row);
+      if (chk) byId[id].selected = !!chk.checked;
+      if (ta) byId[id].commentaire = ta.value;
+    });
+    hivernagePassifSteps = mergePassifFromPrev(Object.values(byId));
+    optionsSteps.hivernage = hivernagePassifSteps.map((s) => ({ ...s }));
+    return true;
+  }
+
+  /** Lit le DOM actif → mémoire. */
+  function readActifDomIntoMemory() {
+    const root = $("#option-steps-editor");
+    if (!root || hivernageMeta.mode === "passif") return false;
+    if (!$$(".hiv-step", root).length) return false;
+    const labeled = collectOptionStepsFromEditor();
+    const emptyKept = (optionsSteps.hivernage || []).filter(
+      (s) => !(s.label || "").trim() && !labeled.some((l) => l.id === s.id)
+    );
+    optionsSteps.hivernage = [...labeled, ...emptyKept];
+    hivernageActifSteps = optionsSteps.hivernage.map((s) => ({
+      id: s.id,
+      label: s.label || "",
+      commentaire: String(s.commentaire || "").trim(),
+      photos: s.photos || [],
+      selected: true,
+    }));
+    return true;
+  }
+
+  function stashCurrentHivernageMode() {
+    if (hivernageMeta.mode === "passif") {
+      if (activeOption === "hivernage") readPassifDomIntoMemory();
+      else if (Array.isArray(optionsSteps.hivernage) && optionsSteps.hivernage.length) {
+        hivernagePassifSteps = mergePassifFromPrev(optionsSteps.hivernage);
+      }
+      if (!hivernagePassifSteps) {
+        hivernagePassifSteps = mergePassifFromPrev([]);
+      }
+    } else {
+      if (activeOption === "hivernage") readActifDomIntoMemory();
+      else if (Array.isArray(optionsSteps.hivernage)) {
+        hivernageActifSteps = optionsSteps.hivernage.map((s) => ({
+          id: s.id,
+          label: s.label || "",
+          commentaire: String(s.commentaire || "").trim(),
+          photos: s.photos || [],
+          selected: true,
+        }));
+      }
+      if (!Array.isArray(hivernageActifSteps)) hivernageActifSteps = [];
+    }
+  }
+
+  function applyHivernageModeSteps() {
+    if (hivernageMeta.mode === "passif") {
+      optionsSteps.hivernage = mergePassifFromPrev(hivernagePassifSteps || []);
+      hivernagePassifSteps = optionsSteps.hivernage.map((s) => ({ ...s }));
+    } else {
+      optionsSteps.hivernage = (hivernageActifSteps || []).length
+        ? hivernageActifSteps.map((s) => ({
+            id: s.id || newInstructionId(),
+            label: s.label || "",
+            commentaire: String(s.commentaire || "").trim(),
+            photos: s.photos || [],
+            selected: true,
+          }))
+        : [{ id: newInstructionId(), label: "", commentaire: "", photos: [] }];
+      hivernageActifSteps = optionsSteps.hivernage.map((s) => ({ ...s }));
+    }
+  }
+
+  function buildHivernageSaveObject() {
+    const modeEl = document.querySelector('input[name="hivernage_mode"]:checked');
+    if (modeEl) {
+      hivernageMeta.mode = modeEl.value === "passif" ? "passif" : "actif";
+    }
+    const com = $("#input-hivernage-commentaire");
+    if (com) hivernageMeta.commentaire = (com.value || "").trim();
+
+    // Toujours lire le panneau ouvert avant de sérialiser
+    if (activeOption === "hivernage") {
+      if (hivernageMeta.mode === "passif") readPassifDomIntoMemory();
+      else readActifDomIntoMemory();
+    } else {
+      stashCurrentHivernageMode();
+    }
+
+    const mapStep = (s, passif) => ({
+      id: s.id,
+      label: (s.label || "").trim(),
+      parent_id: s.parent_id || null,
+      selected: passif ? !!s.selected : !!(s.label || "").trim(),
+      commentaire: String(s.commentaire || "").trim(),
+    });
+    const actifSaved = (hivernageActifSteps || [])
+      .map((s) => mapStep(s, false))
+      .filter((s) => s.label);
+    const passifSaved = mergePassifFromPrev(hivernagePassifSteps || [])
+      .map((s) => mapStep(s, true))
+      .filter((s) => s.label);
+    const mode = hivernageMeta.mode === "passif" ? "passif" : "actif";
+    const stepsForSave = mode === "passif" ? passifSaved : actifSaved;
+    return {
+      mode,
+      commentaire: hivernageMeta.commentaire || "",
+      steps: stepsForSave,
+      actif_steps: actifSaved,
+      passif_steps: passifSaved,
+    };
+  }
+
   function optionHasContent(key) {
     if (key === "compte") {
       return !!(
@@ -171,16 +304,18 @@
     }
     if (key === "hivernage") {
       if ((hivernageMeta.commentaire || "").trim()) return true;
-      const steps = optionsSteps.hivernage || [];
-      if (hivernageMeta.mode === "passif") {
-        return steps.some(
-          (s) =>
-            s.selected ||
-            (s.commentaire || "").trim() ||
-            (hivernagePhotosByInst[s.id] || []).length ||
-            (pendingPhotosByInst[s.id] || []).length
-        );
+      const passif = hivernagePassifSteps || [];
+      if (passif.some((s) => s.selected || (s.commentaire || "").trim())) return true;
+      const actif = hivernageActifSteps || [];
+      if (actif.some((s) => (s.label || "").trim() || (s.commentaire || "").trim())) {
+        return true;
       }
+      // Mode courant affiché dans optionsSteps
+      const cur = optionsSteps.hivernage || [];
+      if (hivernageMeta.mode === "passif") {
+        return cur.some((s) => s.selected || (s.commentaire || "").trim());
+      }
+      return cur.some((s) => (s.label || "").trim() || (s.commentaire || "").trim());
     }
     const steps = optionsSteps[key] || [];
     return steps.some((s) => {
@@ -246,18 +381,41 @@
   function collectOptionStepsFromEditor() {
     const root = $("#option-steps-editor");
     if (!root) return [];
+    const prevById = Object.fromEntries(
+      (optionsSteps[activeOption] || []).map((s) => [s.id, s])
+    );
     return $$(".hiv-step", root)
       .map((row) => {
         const id = row.dataset.id || newInstructionId();
         const label = ($("input[type='text']", row)?.value || "").trim();
         if (!label) return null;
-        return { id, label };
+        const prev = prevById[id];
+        const comEl = $("textarea[data-step-com]", row);
+        return {
+          id,
+          label,
+          commentaire: comEl
+            ? comEl.value
+            : String(prev?.commentaire || "").trim(),
+          selected: prev?.selected,
+          parent_id: prev?.parent_id || null,
+          photos: prev?.photos || [],
+        };
       })
       .filter(Boolean);
   }
 
+  function syncPassifHivernageFromEditor() {
+    if (!readPassifDomIntoMemory()) ensurePassifHivernageSteps();
+  }
+
   function syncActiveOptionFromEditor() {
     if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
+    // Passif : cases à cocher (pas d’inputs texte) — ne pas écraser la liste
+    if (activeOption === "hivernage" && hivernageMeta.mode === "passif") {
+      syncPassifHivernageFromEditor();
+      return;
+    }
     const labeled = collectOptionStepsFromEditor();
     const emptyKept = (optionsSteps[activeOption] || []).filter(
       (s) => !(s.label || "").trim() && !labeled.some((l) => l.id === s.id)
@@ -266,16 +424,9 @@
   }
 
   function collectHivernageFromEditor() {
-    syncActiveOptionFromEditor();
-    syncHivernageMetaFromUi();
-    const steps = optionsSteps.hivernage || [];
-    if (hivernageMeta.mode === "passif") {
-      return steps
-        .filter((s) => s.selected && (s.label || "").trim())
-        .map((s) => ({ id: s.id, label: s.label.trim() }));
-    }
-    return steps
-      .filter((s) => (s.label || "").trim())
+    const saved = buildHivernageSaveObject();
+    return (saved.steps || [])
+      .filter((s) => (saved.mode === "passif" ? s.selected : true) && (s.label || "").trim())
       .map((s) => ({ id: s.id, label: s.label.trim() }));
   }
 
@@ -365,12 +516,23 @@
       photosEl.appendChild(fig);
     });
 
-    const addBtn = document.createElement("button");
-    addBtn.type = "button";
-    addBtn.className = "hiv-add-photo";
-    addBtn.textContent = "＋ Photo";
-    addBtn.addEventListener("click", () => pickAndUploadPhoto(step.id));
-    photosEl.appendChild(addBtn);
+    const actions = document.createElement("div");
+    actions.className = "hiv-photo-actions";
+    const camBtn = document.createElement("button");
+    camBtn.type = "button";
+    camBtn.className = "hiv-add-photo";
+    camBtn.textContent = "📷 Photo";
+    camBtn.title = "Prendre une photo";
+    camBtn.addEventListener("click", () => pickAndUploadPhoto(step.id, { camera: true }));
+    const galBtn = document.createElement("button");
+    galBtn.type = "button";
+    galBtn.className = "hiv-add-photo hiv-add-photo--ghost";
+    galBtn.textContent = "Galerie";
+    galBtn.title = "Choisir dans la galerie";
+    galBtn.addEventListener("click", () => pickAndUploadPhoto(step.id, { camera: false }));
+    actions.appendChild(camBtn);
+    actions.appendChild(galBtn);
+    photosEl.appendChild(actions);
   }
 
   function bindStepCommentaire(row, step) {
@@ -378,6 +540,9 @@
     if (!ta) return;
     ta.addEventListener("input", () => {
       step.commentaire = ta.value;
+      if (hivernageMeta.mode === "passif") {
+        hivernagePassifSteps = (optionsSteps.hivernage || []).map((s) => ({ ...s }));
+      }
       refreshOptionButtonLabels();
     });
   }
@@ -403,6 +568,7 @@
       const chk = $("input[type='checkbox']", row);
       chk?.addEventListener("change", () => {
         step.selected = !!chk.checked;
+        hivernagePassifSteps = (optionsSteps.hivernage || []).map((s) => ({ ...s }));
         refreshOptionButtonLabels();
       });
       bindStepCommentaire(row, step);
@@ -449,10 +615,16 @@
         (isHiv
           ? `<textarea class="hiv-step-com" data-step-com rows="2" placeholder="Commentaire pour cette ligne…">${escapeHtml(step.commentaire || "")}</textarea>`
           : "") +
-        `<div class="hiv-photos" data-photos></div>`;
+        (isHiv || key !== "hivernage"
+          ? `<div class="hiv-photos" data-photos></div>`
+          : "");
 
-      appendStepPhotos($("[data-photos]", row), step);
-      if (isHiv) bindStepCommentaire(row, step);
+      if (isHiv) {
+        bindStepCommentaire(row, step);
+        appendStepPhotos($("[data-photos]", row), step);
+      } else if (key !== "hivernage") {
+        appendStepPhotos($("[data-photos]", row), step);
+      }
 
       $(".hiv-step-remove", row)?.addEventListener("click", () => {
         if (!activeOption || !OPTION_KEYS.includes(activeOption)) return;
@@ -480,8 +652,12 @@
 
   function syncHivernageMetaFromUi() {
     const modeEl = document.querySelector('input[name="hivernage_mode"]:checked');
-    hivernageMeta.mode = modeEl?.value === "passif" ? "passif" : "actif";
-    hivernageMeta.commentaire = ($("#input-hivernage-commentaire")?.value || "").trim();
+    // Ne pas écraser le mode mémoire si aucun radio n’est trouvé (panneau fermé / DOM incomplet)
+    if (modeEl) {
+      hivernageMeta.mode = modeEl.value === "passif" ? "passif" : "actif";
+    }
+    const com = $("#input-hivernage-commentaire");
+    if (com) hivernageMeta.commentaire = (com.value || "").trim();
   }
 
   function applyHivernageModeUi() {
@@ -510,12 +686,12 @@
     });
     if (hint) {
       hint.textContent = passif
-        ? "Coche les étapes concernées. Chaque ligne a son commentaire + photos. Les lignes indentées sont des sous-réponses de la vidange hydraulique."
-        : "Hivernage actif : lignes libres, chacune avec commentaire + photos. Commentaire général en bas si besoin.";
+        ? "Coche les étapes concernées. Commentaire + photos par ligne. Les lignes indentées sont des sous-réponses de la vidange hydraulique."
+        : "Hivernage actif : lignes libres, chacune avec commentaire + photos (caméra ou galerie).";
     }
     if (modeHint) {
       modeHint.textContent = passif
-        ? "Passif : sélectionne les éléments (commentaire et photos par étape)."
+        ? "Passif : sélectionne les éléments + commentaire et photos par étape."
         : "Actif : lignes libres + commentaire et photos par ligne.";
     }
   }
@@ -560,13 +736,14 @@
     pendingPhotosByInst = {};
   }
 
-  async function pickAndUploadPhoto(instructionId) {
-    // Sync labels depuis l'éditeur
+  async function pickAndUploadPhoto(instructionId, opts = {}) {
+    // Sync labels / coches depuis l'éditeur
     syncActiveOptionFromEditor();
     const steps = activeOption ? optionsSteps[activeOption] || [] : [];
     const fromState = steps.find((s) => s.id === instructionId);
     const label = (fromState?.label || "").trim();
-    if (!label) {
+    // Passif : les libellés viennent du template (toujours présents)
+    if (!label && !(activeOption === "hivernage" && hivernageMeta.mode === "passif")) {
       setFeedback(
         $("#nouveau-feedback"),
         "Renseignez le texte de l'étape avant d'ajouter une photo.",
@@ -575,9 +752,11 @@
       return;
     }
 
+    const preferCamera = opts.camera !== false;
     const input = document.createElement("input");
     input.type = "file";
-    input.accept = "image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp";
+    input.accept = "image/*";
+    if (preferCamera) input.setAttribute("capture", "environment");
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
@@ -640,37 +819,24 @@
       email: ($("#input-email")?.value || "").trim(),
       telephone: ($("#input-telephone")?.value || "").trim(),
       password: ($("#input-password")?.value || "").trim(),
-      checklist_hivernage: collectHivernageFromEditor(),
-      options_checklists: (() => {
-        syncActiveOptionFromEditor();
-        syncHivernageMetaFromUi();
-        const out = {};
-        OPTION_KEYS.forEach((k) => {
-          if (k === "hivernage") {
-            out.hivernage = {
-              mode: hivernageMeta.mode,
-              commentaire: hivernageMeta.commentaire || "",
-              steps: (optionsSteps.hivernage || []).map((s) => ({
-                id: s.id,
-                label: (s.label || "").trim(),
-                parent_id: s.parent_id || null,
-                selected:
-                  hivernageMeta.mode === "passif"
-                    ? !!s.selected
-                    : !!(s.label || "").trim(),
-                commentaire: String(s.commentaire || "").trim(),
-              })).filter((s) => s.label),
-            };
-            return;
-          }
-          out[k] = (optionsSteps[k] || [])
-            .map((s) => ({ id: s.id, label: (s.label || "").trim() }))
-            .filter((s) => s.label);
-        });
-        return out;
-      })(),
       piscine_hivernee: !!$("#chk-piscine-hivernee")?.checked,
     };
+    // Hivernage : un seul snapshot pour checklist + options (évite double lecture incohérente)
+    const hiv = buildHivernageSaveObject();
+    payload.checklist_hivernage = (hiv.steps || [])
+      .filter((s) => (hiv.mode === "passif" ? s.selected : true) && (s.label || "").trim())
+      .map((s) => ({ id: s.id, label: s.label.trim() }));
+    const opts = {};
+    OPTION_KEYS.forEach((k) => {
+      if (k === "hivernage") {
+        opts.hivernage = hiv;
+        return;
+      }
+      opts[k] = (optionsSteps[k] || [])
+        .map((s) => ({ id: s.id, label: (s.label || "").trim() }))
+        .filter((s) => s.label);
+    });
+    payload.options_checklists = opts;
     if (latVal && lonVal) {
       payload.latitude = parseFloat(latVal.replace(",", "."));
       payload.longitude = parseFloat(lonVal.replace(",", "."));
@@ -835,6 +1001,8 @@
     clearPendingPhotos();
     optionsSteps = emptyOptionsSteps();
     hivernageMeta = { mode: "actif", commentaire: "" };
+    hivernageActifSteps = [];
+    hivernagePassifSteps = null;
     hivernagePhotosByInst = {};
     activeOption = null;
     const chkHiv = $("#chk-piscine-hivernee");
@@ -846,17 +1014,21 @@
   }
 
   function setEditMode(isEdit) {
+    // Options (dont hivernage) toujours accessibles en création et modification
     const bloc = $("#bloc-edit-options");
-    if (bloc) bloc.hidden = !isEdit;
+    if (bloc) bloc.hidden = false;
     const del = $("#btn-supprimer-client");
-    if (del && !isEdit) del.hidden = true;
-    if (isEdit) refreshOptionButtonLabels();
+    if (del) del.hidden = !isEdit;
+    refreshOptionButtonLabels();
   }
 
   function pruneEmptyOptionSteps(key) {
     if (!key || !OPTION_KEYS.includes(key)) return;
+    // Ne jamais élaguer la checklist passif complète
+    if (key === "hivernage" && hivernageMeta.mode === "passif") return;
     optionsSteps[key] = (optionsSteps[key] || []).filter((s) => {
       if ((s.label || "").trim()) return true;
+      if ((s.commentaire || "").trim()) return true;
       if ((hivernagePhotosByInst[s.id] || []).length) return true;
       if ((pendingPhotosByInst[s.id] || []).length) return true;
       return false;
@@ -864,7 +1036,11 @@
   }
 
   function closeOptionPanel() {
-    syncActiveOptionFromEditor();
+    if (activeOption === "hivernage") {
+      stashCurrentHivernageMode();
+    } else {
+      syncActiveOptionFromEditor();
+    }
     const closing = activeOption;
     pruneEmptyOptionSteps(closing);
     activeOption = null;
@@ -916,13 +1092,7 @@
       const hint = $("#option-panel-hint");
       if (hint) hint.textContent = OPTION_HINTS[key] || "Ajoute des lignes d’information.";
       if (key === "hivernage") {
-        if (hivernageMeta.mode === "passif") {
-          ensurePassifHivernageSteps();
-        } else if (!(optionsSteps.hivernage || []).length) {
-          optionsSteps.hivernage = [
-            { id: newInstructionId(), label: "", commentaire: "", photos: [] },
-          ];
-        }
+        applyHivernageModeSteps();
       } else if (!(optionsSteps[key] || []).length) {
         optionsSteps[key] = [{ id: newInstructionId(), label: "", photos: [] }];
       }
@@ -1090,77 +1260,92 @@
       : Array.isArray(opts.hivernage)
         ? opts.hivernage
         : client.checklist_hivernage || [];
-    if (hivernageMeta.mode === "passif") {
-      const hasSelectedFlag = hivStepsRaw.some(
-        (s) => s && typeof s === "object" && "selected" in s
-      );
-      const selectedIds = new Set();
-      const selectedLabels = new Set();
-      hivStepsRaw.forEach((s) => {
-        if (!s) return;
-        const lab = String(
-          (typeof s === "object" ? s.label || s.texte : s) || ""
-        )
-          .trim()
-          .toLowerCase();
-        const iid = typeof s === "object" ? String(s.id || "").trim() : "";
-        const isOn = hasSelectedFlag
-          ? !!(typeof s === "object" && s.selected)
-          : true;
-        if (!isOn) return;
+    const actifRaw = Array.isArray(hivCfg.actif_steps)
+      ? hivCfg.actif_steps
+      : hivernageMeta.mode === "actif"
+        ? hivStepsRaw
+        : [];
+    const passifRaw = Array.isArray(hivCfg.passif_steps)
+      ? hivCfg.passif_steps
+      : hivernageMeta.mode === "passif"
+        ? hivStepsRaw
+        : [];
+
+    // Actif
+    hivernageActifSteps = (actifRaw || [])
+      .map((item) => {
+        if (item && typeof item === "object") {
+          const label = String(item.label || item.texte || "").trim();
+          if (!label) return null;
+          return {
+            id: String(item.id || "").trim() || newInstructionId(),
+            label,
+            commentaire: String(item.commentaire || "").trim(),
+            photos: [],
+            selected: true,
+          };
+        }
+        const label = String(item || "").trim();
+        return label
+          ? { id: newInstructionId(), label, commentaire: "", photos: [], selected: true }
+          : null;
+      })
+      .filter(Boolean);
+
+    // Passif
+    const hasSelectedFlag = (passifRaw || []).some(
+      (s) => s && typeof s === "object" && "selected" in s
+    );
+    const selectedIds = new Set();
+    const selectedLabels = new Set();
+    const comById = {};
+    const comByLabel = {};
+    (passifRaw || []).forEach((s) => {
+      if (!s) return;
+      const lab = String((typeof s === "object" ? s.label || s.texte : s) || "")
+        .trim()
+        .toLowerCase();
+      const iid = typeof s === "object" ? String(s.id || "").trim() : "";
+      const isOn = hasSelectedFlag
+        ? !!(typeof s === "object" && s.selected)
+        : true;
+      if (isOn) {
         if (iid) selectedIds.add(iid);
         if (lab) selectedLabels.add(lab);
-      });
-      // Ancien id/libellé « pomme » → « pompe »
-      if (selectedIds.has("vh_pomme")) selectedIds.add("vh_pompe");
-      if (selectedLabels.has("pomme de filtration")) {
-        selectedLabels.add("pompe de filtration");
       }
-      const comById = {};
-      const comByLabel = {};
-      hivStepsRaw.forEach((s) => {
-        if (!s || typeof s !== "object") return;
+      if (typeof s === "object") {
         const c = String(s.commentaire || "").trim();
         if (!c) return;
-        const iid = String(s.id || "").trim();
-        const lab = String(s.label || s.texte || "")
-          .trim()
-          .toLowerCase();
         if (iid === "vh_pomme" || iid === "vh_pompe") comById.vh_pompe = c;
         else if (iid) comById[iid] = c;
         if (lab === "pomme de filtration" || lab === "pompe de filtration") {
           comByLabel["pompe de filtration"] = c;
         } else if (lab) comByLabel[lab] = c;
-      });
-      ensurePassifHivernageSteps();
-      optionsSteps.hivernage.forEach((s) => {
-        s.selected =
-          selectedIds.has(s.id) ||
-          selectedLabels.has((s.label || "").toLowerCase());
-        s.commentaire =
-          comById[s.id] ||
-          comByLabel[(s.label || "").toLowerCase()] ||
-          "";
-      });
-    } else {
-      optionsSteps.hivernage = hivStepsRaw
-        .map((item) => {
-          if (item && typeof item === "object") {
-            return {
-              id: String(item.id || "").trim() || newInstructionId(),
-              label: String(item.label || item.texte || "").trim(),
-              commentaire: String(item.commentaire || "").trim(),
-              photos: [],
-              selected: true,
-            };
-          }
-          const label = String(item || "").trim();
-          return label
-            ? { id: newInstructionId(), label, commentaire: "", photos: [], selected: true }
-            : null;
-        })
-        .filter(Boolean);
+      }
+    });
+    if (selectedIds.has("vh_pomme")) selectedIds.add("vh_pompe");
+    if (selectedLabels.has("pomme de filtration")) {
+      selectedLabels.add("pompe de filtration");
     }
+    const passifSeeded = mergePassifFromPrev(passifRaw || []);
+    passifSeeded.forEach((s) => {
+      s.selected =
+        selectedIds.has(s.id) ||
+        selectedLabels.has((s.label || "").toLowerCase());
+      s.commentaire =
+        comById[s.id] ||
+        comByLabel[(s.label || "").toLowerCase()] ||
+        s.commentaire ||
+        "";
+    });
+    hivernagePassifSteps = passifSeeded.map((s) => ({ ...s }));
+
+    applyHivernageModeSteps();
+    document.querySelectorAll('input[name="hivernage_mode"]').forEach((r) => {
+      r.checked = r.value === hivernageMeta.mode;
+    });
+    const comInput = $("#input-hivernage-commentaire");
+    if (comInput) comInput.value = hivernageMeta.commentaire || "";
     closeOptionPanel();
     refreshOptionButtonLabels();
     $("#input-password").value = "";
@@ -1182,16 +1367,24 @@
   }
 
   async function ouvrirEditionClient(client) {
-    clientActif = client;
+    let full = client;
+    try {
+      if (client?.id != null) {
+        full = await api(`/api/clients/${client.id}`);
+      }
+    } catch {
+      full = client;
+    }
+    clientActif = full;
     resetNouveau();
-    $("#edit-client-id").value = String(client.id);
+    $("#edit-client-id").value = String(full.id);
     $("#nouveau-eyebrow").textContent = "Fiche client";
     $("#nouveau-title").textContent = "Modifier le client";
     $("#btn-submit-nouveau").textContent = "Enregistrer les modifications";
     $("#btn-supprimer-client").hidden = false;
     setEditMode(true);
-    await loadClientPhotos(client.id);
-    remplirFormClient(client);
+    await loadClientPhotos(full.id);
+    remplirFormClient(full);
     show("nouveau");
   }
 
@@ -1319,24 +1512,33 @@
   document.querySelectorAll('input[name="hivernage_mode"]').forEach((radio) => {
     radio.addEventListener("change", () => {
       if (activeOption !== "hivernage") return;
+      // Garder les choix de chaque mode séparément (pas de conversion passif → actif)
       const prevMode = hivernageMeta.mode;
-      syncHivernageMetaFromUi();
-      if (hivernageMeta.mode === "passif") {
-        ensurePassifHivernageSteps();
-      } else if (prevMode === "passif") {
-        const selected = (optionsSteps.hivernage || [])
-          .filter((s) => s.selected && (s.label || "").trim())
-          .map((s) => ({
-            id: s.id,
-            label: s.label,
-            commentaire: String(s.commentaire || "").trim(),
-            photos: [],
-            selected: true,
-          }));
-        optionsSteps.hivernage = selected.length
-          ? selected
-          : [{ id: newInstructionId(), label: "", commentaire: "", photos: [] }];
+      const nextMode = radio.value === "passif" ? "passif" : "actif";
+      if (prevMode === nextMode) return;
+      if (prevMode === "passif") {
+        syncPassifHivernageFromEditor();
+        hivernagePassifSteps = mergePassifFromPrev(optionsSteps.hivernage || []);
+      } else {
+        const labeled = collectOptionStepsFromEditor();
+        const emptyKept = (optionsSteps.hivernage || []).filter(
+          (s) => !(s.label || "").trim() && !labeled.some((l) => l.id === s.id)
+        );
+        const current = [...labeled, ...emptyKept];
+        if (current.length) optionsSteps.hivernage = current;
+        hivernageActifSteps = (optionsSteps.hivernage || []).map((s) => ({
+          id: s.id,
+          label: s.label || "",
+          commentaire: String(s.commentaire || "").trim(),
+          photos: s.photos || [],
+          selected: true,
+        }));
       }
+      hivernageMeta.mode = nextMode;
+      document.querySelectorAll('input[name="hivernage_mode"]').forEach((r) => {
+        r.checked = r.value === nextMode;
+      });
+      applyHivernageModeSteps();
       applyHivernageModeUi();
       renderOptionStepsEditor();
       refreshOptionButtonLabels();
@@ -3704,14 +3906,24 @@
         await flushPendingPhotos(client.id);
       }
       if (editId) {
-        await loadClientPhotos(client.id);
-        setEditMode(true);
-        remplirFormClient(client);
-        afficherCredentials(client);
-        if (!client.password_clair) {
-          show("liste");
-          chargerListe();
+        // Recharger depuis le serveur pour confirmer la persistance (mode + étapes)
+        let verified = client;
+        try {
+          verified = await api(`/api/clients/${client.id}`);
+        } catch {
+          verified = client;
         }
+        clientActif = verified;
+        await loadClientPhotos(verified.id);
+        setEditMode(true);
+        remplirFormClient(verified);
+        afficherCredentials(verified);
+        const mode = verified.hivernage_config?.mode || "actif";
+        setFeedback(
+          $("#nouveau-feedback"),
+          `Client mis à jour (${where}) — hivernage ${mode}.`,
+          true
+        );
       } else if (client.password_clair) {
         btn.dataset.continueVisit = "1";
         btn.textContent = "Continuer la visite";

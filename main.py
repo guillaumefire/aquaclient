@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.4"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -767,44 +767,11 @@ def parse_checklist_hivernage(raw: Any) -> list[dict[str, str]]:
     return out
 
 
-def parse_hivernage_config(
-    raw: Any, *, fallback_list: Any = None
-) -> dict[str, Any]:
-    """Normalise {mode, commentaire, steps:[{id,label,parent_id,selected,commentaire}]}."""
-    data = raw
-    if isinstance(raw, str):
-        text = raw.strip()
-        if text:
-            try:
-                data = json.loads(text)
-            except (json.JSONDecodeError, TypeError):
-                data = None
-        else:
-            data = None
-
-    mode = "actif"
-    commentaire = ""
-    steps_raw: list[Any] = []
-
-    if isinstance(data, dict) and (
-        "mode" in data or "commentaire" in data or "steps" in data or "items" in data
-    ):
-        mode = "passif" if str(data.get("mode") or "").strip().lower() == "passif" else "actif"
-        commentaire = str(data.get("commentaire") or "").strip()
-        steps_raw = data.get("steps") if isinstance(data.get("steps"), list) else []
-        if not steps_raw and isinstance(data.get("items"), list):
-            steps_raw = data.get("items") or []
-    elif isinstance(data, list):
-        steps_raw = data
-    elif fallback_list is not None:
-        steps_raw = (
-            fallback_list
-            if isinstance(fallback_list, list)
-            else parse_checklist_hivernage(fallback_list)
-        )
-
+def _normalize_hivernage_steps(
+    steps_raw: list[Any] | None, *, mode: str = "actif"
+) -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
-    for item in steps_raw:
+    for item in steps_raw or []:
         step_com = ""
         if isinstance(item, dict):
             lab = str(item.get("label") or item.get("texte") or "").strip()
@@ -823,8 +790,6 @@ def parse_hivernage_config(
             iid = _new_instruction_id()
             parent_id = None
             selected = True
-        if not lab and mode == "actif":
-            continue
         if not lab:
             continue
         steps.append(
@@ -836,7 +801,76 @@ def parse_hivernage_config(
                 "commentaire": step_com,
             }
         )
-    return {"mode": mode, "commentaire": commentaire, "steps": steps}
+    return steps
+
+
+def parse_hivernage_config(
+    raw: Any, *, fallback_list: Any = None
+) -> dict[str, Any]:
+    """Normalise {mode, commentaire, steps, actif_steps, passif_steps}."""
+    data = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                data = None
+        else:
+            data = None
+
+    mode = "actif"
+    commentaire = ""
+    steps_raw: list[Any] = []
+    actif_raw: list[Any] = []
+    passif_raw: list[Any] = []
+
+    if isinstance(data, dict) and (
+        "mode" in data
+        or "commentaire" in data
+        or "steps" in data
+        or "items" in data
+        or "actif_steps" in data
+        or "passif_steps" in data
+    ):
+        mode = "passif" if str(data.get("mode") or "").strip().lower() == "passif" else "actif"
+        commentaire = str(data.get("commentaire") or "").strip()
+        steps_raw = data.get("steps") if isinstance(data.get("steps"), list) else []
+        if not steps_raw and isinstance(data.get("items"), list):
+            steps_raw = data.get("items") or []
+        if isinstance(data.get("actif_steps"), list):
+            actif_raw = data.get("actif_steps") or []
+        if isinstance(data.get("passif_steps"), list):
+            passif_raw = data.get("passif_steps") or []
+    elif isinstance(data, list):
+        steps_raw = data
+    elif fallback_list is not None:
+        steps_raw = (
+            fallback_list
+            if isinstance(fallback_list, list)
+            else parse_checklist_hivernage(fallback_list)
+        )
+
+    steps = _normalize_hivernage_steps(steps_raw, mode=mode)
+    # Mémoires séparées (pour basculer actif ↔ passif sans perdre l’autre)
+    if not actif_raw and mode == "actif" and steps:
+        actif_raw = steps
+    if not passif_raw and mode == "passif" and steps:
+        passif_raw = steps
+    actif_steps = _normalize_hivernage_steps(actif_raw, mode="actif")
+    passif_steps = _normalize_hivernage_steps(passif_raw, mode="passif")
+    # steps = version courante selon le mode
+    if mode == "passif":
+        steps = passif_steps or steps
+    else:
+        steps = actif_steps or steps
+    return {
+        "mode": mode,
+        "commentaire": commentaire,
+        "steps": steps,
+        "actif_steps": actif_steps,
+        "passif_steps": passif_steps,
+    }
 
 
 def hivernage_steps_for_visite(cfg: dict[str, Any] | None) -> list[dict[str, str]]:
@@ -916,6 +950,8 @@ def serialize_options_checklists(data: dict[str, Any] | None) -> str:
             "mode": cfg["mode"],
             "commentaire": cfg["commentaire"],
             "steps": cfg["steps"],
+            "actif_steps": cfg.get("actif_steps") or [],
+            "passif_steps": cfg.get("passif_steps") or [],
         }
     return json.dumps(clean, ensure_ascii=False)
 
@@ -1373,7 +1409,13 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
                     k: opts.get(k) or [] for k in OPTION_CHECKLIST_KEYS
                 },
                 "hivernage_config": opts.get("hivernage_config")
-                or {"mode": "actif", "commentaire": "", "steps": []},
+                or {
+                    "mode": "actif",
+                    "commentaire": "",
+                    "steps": [],
+                    "actif_steps": [],
+                    "passif_steps": [],
+                },
             }
         )(
             parse_options_checklists(

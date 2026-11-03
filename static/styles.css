@@ -2116,9 +2116,17 @@ body:has(#screen-home.screen--active) .brand-tag {
   padding: 0;
 }
 
+.hiv-photo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
 .hiv-add-photo {
-  width: 64px;
+  min-width: 64px;
   height: 64px;
+  padding: 0.35rem 0.45rem;
   border-radius: 12px;
   border: 1px dashed rgba(11, 110, 114, 0.45);
   background: rgba(46, 207, 192, 0.12);
@@ -2130,7 +2138,12 @@ body:has(#screen-home.screen--active) .brand-tag {
   display: grid;
   place-content: center;
   text-align: center;
-  padding: 0.25rem;
+}
+
+.hiv-add-photo--ghost {
+  background: rgba(255, 255, 255, 0.55);
+  border-style: solid;
+  border-color: rgba(11, 110, 114, 0.28);
 }
 
 .hiv-add-photo:disabled {
