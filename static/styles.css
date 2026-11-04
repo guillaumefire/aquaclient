@@ -556,6 +556,141 @@ body:has(#screen-home.screen--active) .brand-tag {
   gap: 0.65rem;
 }
 
+.client-bon-row {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.45rem 0;
+  padding: 0.95rem 1rem;
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.68));
+  border: 1px solid rgba(11, 110, 114, 0.18);
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.client-bon-row:hover,
+.client-bon-row:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(15, 118, 110, 0.4);
+  outline: none;
+}
+
+.client-bon-row.is-expanded {
+  border-color: rgba(15, 118, 110, 0.45);
+  background: linear-gradient(135deg, rgba(11, 110, 114, 0.12), rgba(255, 255, 255, 0.75));
+}
+
+.client-bon-main {
+  flex: 1;
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.client-bon-main strong {
+  color: var(--teal-deep);
+  font-size: 1.08rem;
+}
+
+.bon-select {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.3rem 0;
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.62));
+  border: 1px solid rgba(11, 110, 114, 0.16);
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.bon-select--nested {
+  margin-left: 0.55rem;
+  padding-left: 0.85rem;
+  border-left: 3px solid rgba(11, 110, 114, 0.28);
+}
+
+.bon-select:hover,
+.bon-select:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(15, 118, 110, 0.4);
+  outline: none;
+}
+
+.bon-select.is-open {
+  border-color: rgba(15, 118, 110, 0.45);
+  background: linear-gradient(135deg, rgba(46, 207, 192, 0.22), rgba(255, 255, 255, 0.7));
+}
+
+.bon-select-main {
+  flex: 1;
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.bon-select-main strong {
+  color: var(--teal-deep);
+  font-size: 1.02rem;
+}
+
+.bon-select-type {
+  font-size: 0.92rem;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.bon-select-chevron {
+  font-size: 1.4rem;
+  color: var(--ink-soft);
+  line-height: 1;
+}
+
+.bon-card {
+  list-style: none;
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.35rem 0;
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(11, 110, 114, 0.14), rgba(46, 207, 192, 0.1));
+  border: 1px solid rgba(11, 110, 114, 0.18);
+}
+
+.bon-card.is-open {
+  border-color: rgba(15, 118, 110, 0.45);
+  background: linear-gradient(135deg, rgba(46, 207, 192, 0.28), rgba(11, 110, 114, 0.12));
+}
+
+.bon-card-head {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.bon-card-head strong {
+  color: var(--teal-deep);
+  font-size: 1.08rem;
+}
+
+.bon-card-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.bon-card-lines li {
+  padding: 0.35rem 0.55rem;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.45);
+  font-size: 0.95rem;
+}
+
 .facture-item {
   display: grid;
   gap: 0.75rem;

@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.9.4"
+APP_VERSION = "1.11.2"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -82,8 +82,15 @@ DEFAULT_CHECKLIST_HIVERNAGE = [
 NOTE_FIELDS = ["id", "client_id", "date", "date_ref", "texte"]
 FOURNITURE_FIELDS = [
     "id", "client_id", "date", "date_ref", "description", "quantite",
-    "envoyee", "payee",
+    "envoyee", "payee", "visite_id",
 ]
+
+VISITE_TYPE_LABELS = {
+    "depannage": "Dépannage",
+    "entretien_simple": "Entretien classique",
+    "entretien_complet": "Entretien complet",
+    "hivernage": "Hivernage",
+}
 ANALYSE_FIELDS = ["id", "client_id", "date", "date_ref", "texte"]
 VISITE_FIELDS = [
     "id", "client_id", "date", "type", "checklist_json",
@@ -286,6 +293,24 @@ _migrate_hist_date_ref()
 _migrate_factures_statut()
 _migrate_visites_columns()
 
+
+def _migrate_fournitures_visite_id() -> None:
+    """Ajoute visite_id (bon d'intervention) sur les fournitures."""
+    _ensure_csv(FOURNITURES_CSV, FOURNITURE_FIELDS)
+    if not FOURNITURES_CSV.exists():
+        return
+    with FOURNITURES_CSV.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if "visite_id" in fieldnames and fieldnames == FOURNITURE_FIELDS:
+        return
+    normalized = [{k: r.get(k, "") for k in FOURNITURE_FIELDS} for r in rows]
+    write_csv(FOURNITURES_CSV, FOURNITURE_FIELDS, normalized)
+
+
+_migrate_fournitures_visite_id()
+
 # Supabase : crée les tables si besoin, puis bascule lecture/écriture
 _csv_read_local = lambda path: (  # noqa: E731
     list(csv.DictReader(path.open(newline="", encoding="utf-8"))) if path.exists() else []
@@ -372,6 +397,7 @@ class CommandeIA(BaseModel):
     client_id: int
     texte: str
     intent_force: str | None = None  # note | fourniture | analyse
+    visite_id: int | None = None  # rattache la fourniture au bon d'intervention ouvert
 
 
 class PositionClient(BaseModel):
@@ -957,13 +983,28 @@ def serialize_options_checklists(data: dict[str, Any] | None) -> str:
 
 
 def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None) -> dict[str, str]:
-    """Persiste options_checklists + synchronise checklist_hivernage."""
+    """Persiste options_checklists + synchronise checklist_hivernage (remplace, ne fusionne pas)."""
     existing = existing or {}
     if getattr(body, "options_checklists", None) is not None:
-        raw_opts = body.options_checklists
-        opts_for_ser = raw_opts if isinstance(raw_opts, dict) else {}
-        parsed = parse_options_checklists(raw_opts)
-        checklist = parsed.get("hivernage") or []
+        raw_opts = body.options_checklists if isinstance(body.options_checklists, dict) else {}
+        # Remplacement intégral de l'objet hivernage fourni (pas de merge avec l'existant)
+        hiv_raw = raw_opts.get("hivernage")
+        if isinstance(hiv_raw, dict) or isinstance(hiv_raw, list) or hiv_raw is None:
+            cfg = parse_hivernage_config(hiv_raw)
+        else:
+            cfg = parse_hivernage_config(None)
+        opts_for_ser = {
+            **{k: raw_opts.get(k) or [] for k in OPTION_CHECKLIST_KEYS if k != "hivernage"},
+            "hivernage_config": cfg,
+            "hivernage": {
+                "mode": cfg["mode"],
+                "commentaire": cfg["commentaire"],
+                "steps": cfg["steps"],
+                "actif_steps": cfg.get("actif_steps") or [],
+                "passif_steps": cfg.get("passif_steps") or [],
+            },
+        }
+        checklist = hivernage_steps_for_visite(cfg)
     else:
         opts_for_ser = parse_options_checklists(
             existing.get("options_checklists"),
@@ -971,10 +1012,10 @@ def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None)
         )
         if getattr(body, "checklist_hivernage", None) is not None:
             cfg = parse_hivernage_config(
-                opts_for_ser.get("hivernage_config"),
+                None,
                 fallback_list=body.checklist_hivernage,
             )
-            # Remplacer les steps par la checklist envoyée (legacy)
+            # Remplacer entièrement (legacy) — pas de conservation de l'ancien mode
             cfg["steps"] = [
                 {
                     "id": s["id"],
@@ -985,6 +1026,12 @@ def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None)
                 }
                 for s in parse_checklist_hivernage(body.checklist_hivernage)
             ]
+            if cfg["mode"] == "passif":
+                cfg["passif_steps"] = list(cfg["steps"])
+                cfg["actif_steps"] = []
+            else:
+                cfg["actif_steps"] = list(cfg["steps"])
+                cfg["passif_steps"] = []
             opts_for_ser = {
                 **{k: opts_for_ser.get(k) or [] for k in OPTION_CHECKLIST_KEYS if k != "hivernage"},
                 "hivernage_config": cfg,
@@ -997,6 +1044,115 @@ def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None)
         "options_checklists": serialize_options_checklists(opts_for_ser),
         "checklist_hivernage": serialize_checklist_hivernage(checklist),
     }
+
+
+def _hivernage_step_ids_from_client_row(row: dict[str, Any]) -> set[str]:
+    cfg = parse_options_checklists(
+        row.get("options_checklists"),
+        fallback_hivernage=row.get("checklist_hivernage"),
+    ).get("hivernage_config") or {}
+    ids: set[str] = set()
+    for key in ("steps", "actif_steps", "passif_steps"):
+        for s in cfg.get(key) or []:
+            if isinstance(s, dict):
+                iid = str(s.get("id") or "").strip()
+                if iid:
+                    ids.add(iid)
+    for s in parse_checklist_hivernage(row.get("checklist_hivernage")):
+        iid = str(s.get("id") or "").strip()
+        if iid:
+            ids.add(iid)
+    return ids
+
+
+def _replace_incomplete_hivernage_visits(client_id: int, client_row: dict[str, Any]) -> int:
+    """
+    Supprime les visites hivernage incomplètes du client et les fournitures
+    rattachées à ces bons — la nouvelle config servira au prochain démarrage.
+    """
+    rows = read_csv(VISITES_CSV)
+    to_drop: set[int] = set()
+    kept: list[dict[str, str]] = []
+    for r in rows:
+        try:
+            cid = int(r.get("client_id") or 0)
+            vid = int(r.get("id") or 0)
+        except (TypeError, ValueError):
+            kept.append(r)
+            continue
+        if cid != int(client_id) or (r.get("type") or "") != "hivernage":
+            kept.append(r)
+            continue
+        try:
+            checklist = json.loads(r.get("checklist_json") or "[]")
+        except json.JSONDecodeError:
+            checklist = []
+        # Visite terminée (checklist complète) → historique conservé
+        if _checklist_is_complete(checklist) and (r.get("fin") or "").strip():
+            kept.append(r)
+            continue
+        # Incomplet / en cours → on remplace : suppression
+        if vid:
+            to_drop.add(vid)
+    if not to_drop:
+        return 0
+    write_csv(VISITES_CSV, VISITE_FIELDS, kept)
+
+    fourn = read_csv(FOURNITURES_CSV)
+    fourn_kept = [
+        f
+        for f in fourn
+        if not (
+            str(f.get("visite_id") or "").strip().isdigit()
+            and int(f.get("visite_id")) in to_drop
+        )
+    ]
+    if len(fourn_kept) != len(fourn):
+        write_csv(FOURNITURES_CSV, FOURNITURE_FIELDS, fourn_kept)
+
+    # Plus de visite en cours → statut client
+    if not from_bool_csv(client_row.get("piscine_hivernee", "")):
+        _set_client_hivernage_statut(client_id, hivernee=False, en_cours=False)
+    return len(to_drop)
+
+
+def _purge_orphan_hivernage_photos(client_id: int, obsolete_ids: set[str]) -> int:
+    """Supprime les photos liées aux étapes hivernage retirées de la config."""
+    if not obsolete_ids:
+        return 0
+    removed = 0
+    for ph in list_client_photos(client_id):
+        iid = str(ph.get("instruction_id") or "").strip()
+        if iid not in obsolete_ids:
+            continue
+        try:
+            delete_photo_row(str(ph["id"]))
+            removed += 1
+        except Exception:
+            logging.getLogger("aquaclient").exception(
+                "Purge photo hivernage %s", ph.get("id")
+            )
+    return removed
+
+
+def _apply_hivernage_replacement(client_id: int, before: dict[str, Any], after: dict[str, Any]) -> None:
+    """Après MAJ client : remplace l'ancien hivernage (visites incomplètes + photos orphelines)."""
+    old_ids = _hivernage_step_ids_from_client_row(before)
+    new_ids = _hivernage_step_ids_from_client_row(after)
+    old_ser = (
+        (before.get("options_checklists") or ""),
+        (before.get("checklist_hivernage") or ""),
+    )
+    new_ser = (
+        (after.get("options_checklists") or ""),
+        (after.get("checklist_hivernage") or ""),
+    )
+    if old_ser == new_ser:
+        return
+    _replace_incomplete_hivernage_visits(client_id, after)
+    obsolete = old_ids - new_ids
+    if obsolete:
+        _purge_orphan_hivernage_photos(client_id, obsolete)
 
 
 def checklist_storage_needs_ids(raw: Any) -> bool:
@@ -1406,7 +1562,16 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         **(
             lambda opts: {
                 "options_checklists": {
-                    k: opts.get(k) or [] for k in OPTION_CHECKLIST_KEYS
+                    **{k: opts.get(k) or [] for k in OPTION_CHECKLIST_KEYS if k != "hivernage"},
+                    # Objet complet (mode + mémoires actif/passif), pas la liste filtrée visite
+                    "hivernage": opts.get("hivernage_config")
+                    or {
+                        "mode": "actif",
+                        "commentaire": "",
+                        "steps": [],
+                        "actif_steps": [],
+                        "passif_steps": [],
+                    },
                 },
                 "hivernage_config": opts.get("hivernage_config")
                 or {
@@ -2383,6 +2548,13 @@ async def update_client(client_id: int, body: ModifierClient):
     if target is None:
         raise HTTPException(status_code=404, detail="Client introuvable")
 
+    hivernage_before = {
+        "options_checklists": target.get("options_checklists") or "",
+        "checklist_hivernage": target.get("checklist_hivernage") or "",
+        "piscine_hivernee": target.get("piscine_hivernee") or "",
+        "hivernage_en_cours": target.get("hivernage_en_cours") or "",
+    }
+
     if body.latitude is not None and body.longitude is not None:
         lat, lon = body.latitude, body.longitude
     elif body.adresse.strip() != (target.get("adresse") or "").strip():
@@ -2494,8 +2666,16 @@ async def update_client(client_id: int, body: ModifierClient):
         ),
     })
     write_csv(CLIENTS_CSV, CLIENT_FIELDS, rows)
+    # Nouvelle config hivernage → remplace l'ancienne (visites incomplètes + photos orphelines)
+    try:
+        _apply_hivernage_replacement(client_id, hivernage_before, target)
+    except Exception:
+        logging.getLogger("aquaclient").exception(
+            "Remplacement hivernage client %s", client_id
+        )
     out = row_client(target, password_clair=password_clair)
     out["photos"] = list_client_photos(client_id)
+    out["storage"] = "supabase" if supabase_db.enabled() else "csv"
     return out
 
 
@@ -2705,6 +2885,7 @@ def get_client(client_id: int):
                 "analyses": analyses,
                 "visites": visites,
                 "photos": list_client_photos(client_id),
+                "storage": "supabase" if supabase_db.enabled() else "csv",
             }
     raise HTTPException(status_code=404, detail="Client introuvable")
 
@@ -2775,6 +2956,25 @@ def _set_client_hivernage_statut(client_id: int, *, hivernee: bool, en_cours: bo
         )
 
 
+def _resolve_bon_visite_id(client_id: int, visite_id: int | None) -> str:
+    """Retourne visite_id si la visite est un bon ouvert (début sans fin) pour ce client."""
+    if not visite_id:
+        return ""
+    r = read_visite_row(int(visite_id))
+    if not r:
+        return ""
+    try:
+        if int(r.get("client_id") or 0) != int(client_id):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    if not (r.get("debut") or "").strip():
+        return ""
+    if (r.get("fin") or "").strip():
+        return ""
+    return str(int(visite_id))
+
+
 def _ensure_facture_hivernage(client_id: int, visite_id: int) -> dict[str, str] | None:
     """Ajoute 1× Hivernage en facture (idempotent via date_ref=v{visite_id})."""
     marker = f"v{visite_id}"
@@ -2786,6 +2986,9 @@ def _ensure_facture_hivernage(client_id: int, visite_id: int) -> dict[str, str] 
         except (TypeError, ValueError):
             continue
         if (r.get("date_ref") or "").strip() == marker:
+            if not (r.get("visite_id") or "").strip():
+                r["visite_id"] = str(int(visite_id))
+                write_csv(FOURNITURES_CSV, FOURNITURE_FIELDS, rows)
             return r
         desc = (r.get("description") or "").strip().lower()
         if desc == "hivernage" and (r.get("date_ref") or "").strip() == marker:
@@ -2800,6 +3003,7 @@ def _ensure_facture_hivernage(client_id: int, visite_id: int) -> dict[str, str] 
         "quantite": "1",
         "envoyee": "non",
         "payee": "non",
+        "visite_id": str(int(visite_id)),
     }
     rows.append(row)
     write_csv(FOURNITURES_CSV, FOURNITURE_FIELDS, rows)
@@ -3055,6 +3259,7 @@ def commande_ia(body: CommandeIA):
     if parsed["intent"] == "fourniture":
         rows = read_csv(FOURNITURES_CSV)
         fid = next_id(rows)
+        bon_vid = _resolve_bon_visite_id(body.client_id, body.visite_id)
         row = {
             "id": fid,
             "client_id": body.client_id,
@@ -3064,6 +3269,7 @@ def commande_ia(body: CommandeIA):
             "quantite": parsed["quantite"],
             "envoyee": "non",
             "payee": "non",
+            "visite_id": bon_vid,
         }
         rows.append(row)
         write_csv(FOURNITURES_CSV, FOURNITURE_FIELDS, rows)
@@ -3156,9 +3362,129 @@ def delete_fourniture(fourniture_id: int):
     return {"ok": True, "id": fourniture_id}
 
 
-def _facture_enrichie(row: dict[str, str], clients_by_id: dict[int, dict[str, str]]) -> dict[str, Any]:
+def _stamp_heure(stamp: str) -> str:
+    """Extrait HH:MM depuis 'YYYY-MM-DD HH:MM:SS' (ou équivalent)."""
+    s = (stamp or "").strip()
+    if not s:
+        return ""
+    if " " in s:
+        tail = s.split(" ", 1)[1]
+        return tail[:5] if len(tail) >= 5 else tail
+    if "T" in s:
+        tail = s.split("T", 1)[1]
+        return tail[:5] if len(tail) >= 5 else tail
+    return ""
+
+
+def _format_duree_minutes(raw: Any) -> str:
+    try:
+        m = float(str(raw or "").strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return ""
+    if m < 0:
+        return ""
+    total = int(round(m))
+    h, mn = divmod(total, 60)
+    if h <= 0:
+        return f"{mn} min"
+    return f"{h} h {mn:02d} min"
+
+
+def _visite_bon_meta(visite: dict[str, str] | None) -> dict[str, Any]:
+    empty = {
+        "visite_id": None,
+        "bon_type": "",
+        "bon_type_label": "",
+        "bon_date": "",
+        "bon_debut": "",
+        "bon_fin": "",
+        "bon_duree_minutes": None,
+        "bon_duree_label": "",
+        "bon_temps": "",
+        "bon_ouvert": False,
+        "bon_label": "",
+    }
+    if not visite:
+        return empty
+    try:
+        vid = int(visite.get("id") or 0)
+    except (TypeError, ValueError):
+        vid = 0
+    vtype = (visite.get("type") or "").strip()
+    type_label = VISITE_TYPE_LABELS.get(vtype, vtype.replace("_", " ").capitalize() or "Intervention")
+    debut = (visite.get("debut") or "").strip()
+    fin = (visite.get("fin") or "").strip()
+    date = (visite.get("date") or debut or "")[:10]
+    ouvert = bool(debut) and not fin
+    statut = "en cours" if ouvert else ("terminé" if fin else "")
+    h_debut = _stamp_heure(debut)
+    h_fin = _stamp_heure(fin)
+    duree_raw = (visite.get("duree_minutes") or "").strip()
+    try:
+        duree_num = float(duree_raw.replace(",", ".")) if duree_raw else None
+    except ValueError:
+        duree_num = None
+    duree_label = _format_duree_minutes(duree_num) if duree_num is not None else ""
+    if h_debut and h_fin:
+        temps = f"{h_debut} → {h_fin}"
+    elif h_debut and ouvert:
+        temps = f"depuis {h_debut}"
+    elif h_debut:
+        temps = h_debut
+    else:
+        temps = ""
+    if duree_label:
+        temps = f"{temps} · {duree_label}" if temps else duree_label
+    parts = [f"Bon #{vid}", type_label]
+    if date:
+        parts.append(date)
+    if temps:
+        parts.append(temps)
+    if statut:
+        parts.append(f"({statut})")
+    return {
+        "visite_id": vid or None,
+        "bon_type": vtype,
+        "bon_type_label": type_label,
+        "bon_date": date,
+        "bon_debut": debut,
+        "bon_fin": fin,
+        "bon_duree_minutes": duree_num,
+        "bon_duree_label": duree_label,
+        "bon_temps": temps,
+        "bon_ouvert": ouvert,
+        "bon_label": " · ".join(parts),
+    }
+
+
+def _facture_enrichie(
+    row: dict[str, str],
+    clients_by_id: dict[int, dict[str, str]],
+    visites_by_id: dict[int, dict[str, str]] | None = None,
+) -> dict[str, Any]:
     cid = int(row["client_id"]) if str(row.get("client_id", "")).isdigit() else 0
     client = clients_by_id.get(cid) or {}
+    vid_raw = (row.get("visite_id") or "").strip()
+    try:
+        vid = int(vid_raw) if vid_raw else 0
+    except (TypeError, ValueError):
+        vid = 0
+    visite = (visites_by_id or {}).get(vid) if vid else None
+    bon = _visite_bon_meta(visite) if visite else {
+        **{
+            "visite_id": vid or None,
+            "bon_type": "",
+            "bon_type_label": "",
+            "bon_date": "",
+            "bon_debut": "",
+            "bon_fin": "",
+            "bon_duree_minutes": None,
+            "bon_duree_label": "",
+            "bon_temps": "",
+            "bon_ouvert": False,
+            "bon_label": f"Bon #{vid}" if vid else "",
+        }
+    }
     return {
         "id": int(row["id"]) if str(row.get("id", "")).isdigit() else row.get("id"),
         "client_id": cid,
@@ -3172,6 +3498,17 @@ def _facture_enrichie(row: dict[str, str], clients_by_id: dict[int, dict[str, st
         "quantite": row.get("quantite") or "1",
         "envoyee": _norm_oui_non(row.get("envoyee")),
         "payee": _norm_oui_non(row.get("payee")),
+        "visite_id": bon["visite_id"],
+        "bon_type": bon["bon_type"],
+        "bon_type_label": bon["bon_type_label"],
+        "bon_date": bon["bon_date"],
+        "bon_debut": bon.get("bon_debut") or "",
+        "bon_fin": bon.get("bon_fin") or "",
+        "bon_duree_minutes": bon.get("bon_duree_minutes"),
+        "bon_duree_label": bon.get("bon_duree_label") or "",
+        "bon_temps": bon.get("bon_temps") or "",
+        "bon_ouvert": bon["bon_ouvert"],
+        "bon_label": bon["bon_label"],
     }
 
 
@@ -3268,6 +3605,111 @@ def patch_hivernage_statut(client_id: int, body: HivernageStatutUpdate):
     raise HTTPException(status_code=404, detail="Client introuvable")
 
 
+@app.get("/api/bons")
+def liste_bons(
+    client_id: int | None = None,
+    q: str = "",
+    statut: str = "tous",
+):
+    """
+    Liste des bons d'intervention (= visites démarrées),
+    avec client, horaires et fournitures rattachées.
+    statut: tous | ouverts | termines
+    """
+    clients_by_id = {
+        int(c["id"]): c for c in read_csv(CLIENTS_CSV) if str(c.get("id", "")).isdigit()
+    }
+    factures = read_csv(FOURNITURES_CSV)
+    by_visite: dict[int, list[dict[str, Any]]] = {}
+    for fr in factures:
+        vid_raw = (fr.get("visite_id") or "").strip()
+        if not vid_raw or not str(vid_raw).isdigit():
+            continue
+        vid = int(vid_raw)
+        by_visite.setdefault(vid, []).append(
+            _facture_enrichie(fr, clients_by_id, None)
+        )
+
+    bons: list[dict[str, Any]] = []
+    for v in read_csv(VISITES_CSV):
+        if not (v.get("debut") or "").strip():
+            continue
+        try:
+            vid = int(v.get("id") or 0)
+            cid = int(v.get("client_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not vid:
+            continue
+        if client_id is not None and cid != int(client_id):
+            continue
+        client = clients_by_id.get(cid) or {}
+        label = (
+            f"{(client.get('nom') or '').strip()} {(client.get('prenom') or '').strip()}".strip()
+            or f"Client #{cid}"
+        )
+        query = (q or "").strip().lower()
+        if query and query not in label.lower() and query not in (v.get("type") or "").lower():
+            continue
+        meta = _visite_bon_meta(v)
+        st = (statut or "tous").strip().lower()
+        if st in {"ouverts", "ouvert", "en_cours"} and not meta["bon_ouvert"]:
+            continue
+        if st in {"termines", "terminés", "termine", "terminé", "fermes"} and meta["bon_ouvert"]:
+            continue
+        lignes = sorted(
+            by_visite.get(vid, []),
+            key=lambda r: int(r["id"]) if isinstance(r.get("id"), int) else 0,
+        )
+        # Enrichir les lignes avec le meta bon (visite déjà connue)
+        for ligne in lignes:
+            ligne["visite_id"] = vid
+            ligne["bon_type"] = meta["bon_type"]
+            ligne["bon_type_label"] = meta["bon_type_label"]
+            ligne["bon_date"] = meta["bon_date"]
+            ligne["bon_debut"] = meta["bon_debut"]
+            ligne["bon_fin"] = meta["bon_fin"]
+            ligne["bon_duree_minutes"] = meta["bon_duree_minutes"]
+            ligne["bon_duree_label"] = meta["bon_duree_label"]
+            ligne["bon_temps"] = meta["bon_temps"]
+            ligne["bon_ouvert"] = meta["bon_ouvert"]
+            ligne["bon_label"] = meta["bon_label"]
+            ligne["client_label"] = label
+        all_env = bool(lignes) and all(l.get("envoyee") == "oui" for l in lignes)
+        all_pay = bool(lignes) and all(l.get("payee") == "oui" for l in lignes)
+        bons.append(
+            {
+                "visite_id": vid,
+                "client_id": cid,
+                "client_label": label,
+                "type": meta["bon_type"],
+                "type_label": meta["bon_type_label"],
+                "date": meta["bon_date"],
+                "debut": meta["bon_debut"],
+                "fin": meta["bon_fin"],
+                "duree_minutes": meta["bon_duree_minutes"],
+                "duree_label": meta["bon_duree_label"],
+                "temps": meta["bon_temps"],
+                "ouvert": meta["bon_ouvert"],
+                "label": meta["bon_label"],
+                "nb_lignes": len(lignes),
+                "envoyee": all_env,
+                "payee": all_pay,
+                "lignes": lignes,
+            }
+        )
+
+    bons.sort(
+        key=lambda b: (
+            b.get("date") or "",
+            b.get("debut") or "",
+            int(b.get("visite_id") or 0),
+        ),
+        reverse=True,
+    )
+    return {"total": len(bons), "bons": bons, "client_id": client_id, "q": (q or "").strip(), "statut": statut}
+
+
 @app.get("/api/factures")
 def liste_factures(
     filtre: str = "toutes",
@@ -3283,9 +3725,19 @@ def liste_factures(
     clients_by_id = {
         int(c["id"]): c for c in read_csv(CLIENTS_CSV) if str(c.get("id", "")).isdigit()
     }
-    rows = [_facture_enrichie(r, clients_by_id) for r in read_csv(FOURNITURES_CSV)]
-    # Plus récentes d'abord
-    rows.sort(key=lambda r: (r.get("date") or "", int(r["id"]) if isinstance(r["id"], int) else 0), reverse=True)
+    visites_by_id = {
+        int(v["id"]): v for v in read_csv(VISITES_CSV) if str(v.get("id", "")).isdigit()
+    }
+    rows = [_facture_enrichie(r, clients_by_id, visites_by_id) for r in read_csv(FOURNITURES_CSV)]
+    # Bons récents d'abord, puis lignes hors bon
+    rows.sort(
+        key=lambda r: (
+            r.get("bon_date") or r.get("date") or "",
+            int(r["visite_id"]) if isinstance(r.get("visite_id"), int) else 0,
+            int(r["id"]) if isinstance(r.get("id"), int) else 0,
+        ),
+        reverse=True,
+    )
 
     if client_id is not None:
         rows = [r for r in rows if int(r.get("client_id") or 0) == int(client_id)]
@@ -3307,7 +3759,8 @@ def liste_factures(
             chunk = by_client[label]
             chunk.sort(
                 key=lambda r: (
-                    r.get("date") or "",
+                    r.get("bon_date") or r.get("date") or "",
+                    int(r["visite_id"]) if isinstance(r.get("visite_id"), int) else 0,
                     int(r["id"]) if isinstance(r.get("id"), int) else 0,
                 ),
                 reverse=True,

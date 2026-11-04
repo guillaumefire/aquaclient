@@ -966,7 +966,10 @@
   }
 
   $$("[data-goto]").forEach((btn) => {
-    btn.addEventListener("click", () => show(btn.dataset.goto));
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.goto;
+      if (target) show(target);
+    });
   });
 
   $("#btn-home-brand")?.addEventListener("click", () => show("home"));
@@ -1008,7 +1011,7 @@
     const chkHiv = $("#chk-piscine-hivernee");
     if (chkHiv) chkHiv.checked = false;
     setEditMode(false);
-    closeOptionPanel();
+    closeOptionPanel({ discard: true });
     syncBlocPassage();
     syncBlocCompte();
   }
@@ -1035,14 +1038,16 @@
     });
   }
 
-  function closeOptionPanel() {
-    if (activeOption === "hivernage") {
-      stashCurrentHivernageMode();
-    } else {
-      syncActiveOptionFromEditor();
+  function closeOptionPanel({ discard = false } = {}) {
+    // discard=true : fermeture après rechargement serveur — ne pas relire un DOM obsolète
+    if (!discard) {
+      if (activeOption === "hivernage") {
+        stashCurrentHivernageMode();
+      } else {
+        syncActiveOptionFromEditor();
+      }
+      pruneEmptyOptionSteps(activeOption);
     }
-    const closing = activeOption;
-    pruneEmptyOptionSteps(closing);
     activeOption = null;
     const panel = $("#option-panel");
     if (panel) panel.hidden = true;
@@ -1260,16 +1265,23 @@
       : Array.isArray(opts.hivernage)
         ? opts.hivernage
         : client.checklist_hivernage || [];
-    const actifRaw = Array.isArray(hivCfg.actif_steps)
-      ? hivCfg.actif_steps
-      : hivernageMeta.mode === "actif"
-        ? hivStepsRaw
-        : [];
-    const passifRaw = Array.isArray(hivCfg.passif_steps)
-      ? hivCfg.passif_steps
-      : hivernageMeta.mode === "passif"
-        ? hivStepsRaw
-        : [];
+    // [] vide ne doit pas masquer steps / l’autre mode (sinon plus rien à modifier)
+    const actifRaw =
+      Array.isArray(hivCfg.actif_steps) && hivCfg.actif_steps.length
+        ? hivCfg.actif_steps
+        : hivernageMeta.mode === "actif"
+          ? hivStepsRaw
+          : Array.isArray(hivCfg.actif_steps)
+            ? hivCfg.actif_steps
+            : [];
+    const passifRaw =
+      Array.isArray(hivCfg.passif_steps) && hivCfg.passif_steps.length
+        ? hivCfg.passif_steps
+        : hivernageMeta.mode === "passif"
+          ? hivStepsRaw
+          : Array.isArray(hivCfg.passif_steps)
+            ? hivCfg.passif_steps
+            : [];
 
     // Actif
     hivernageActifSteps = (actifRaw || [])
@@ -1346,7 +1358,7 @@
     });
     const comInput = $("#input-hivernage-commentaire");
     if (comInput) comInput.value = hivernageMeta.commentaire || "";
-    closeOptionPanel();
+    closeOptionPanel({ discard: true });
     refreshOptionButtonLabels();
     $("#input-password").value = "";
     $("#input-password").placeholder = client.has_password
@@ -2081,95 +2093,354 @@
 
   $("#btn-agenda")?.addEventListener("click", () => afficherAgenda());
 
-  let factureFiltre = "toutes";
+  let factureFiltre = "tous";
+  /** @type {null|object} */
+  let bonSelectionne = null;
+  /** @type {object[]} */
+  let bonsCache = [];
+  /** Client déplié dans la liste (id string) */
+  let clientBonsOuvert = null;
 
-  async function afficherFactures(filtre) {
+  function syncFacturesChrome() {
+    const title = $("#factures-title");
+    const back = $("#btn-factures-back");
+    const search = $("#bloc-fourni-search");
+    const filtres = $("#factures-filtres");
+    if (bonSelectionne) {
+      if (title) title.textContent = `Bon #${bonSelectionne.visite_id}`;
+      if (back) back.textContent = "← Clients";
+      if (search) search.hidden = true;
+      if (filtres) filtres.hidden = true;
+    } else {
+      if (title) {
+        title.textContent =
+          factureFiltre === "hors_bon" ? "Hors bon" : "Bons d’intervention";
+      }
+      if (back) back.textContent = "← Accueil";
+      if (search) search.hidden = false;
+      if (filtres) filtres.hidden = false;
+    }
+  }
+
+  function appendFactureFlagHandlers(root) {
+    $$("[data-flag]", root).forEach((btn) => {
+      btn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const flag = btn.dataset.flag;
+        const next = btn.getAttribute("aria-pressed") !== "true";
+        const ids = (btn.dataset.ids || btn.dataset.id || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (!ids.length) return;
+        try {
+          await Promise.all(
+            ids.map((id) =>
+              api(`/api/factures/${id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ [flag]: next }),
+              })
+            )
+          );
+          if (bonSelectionne) {
+            await ouvrirBonDetail(bonSelectionne.visite_id, { silent: true });
+          } else {
+            await afficherFactures(factureFiltre);
+          }
+        } catch (err) {
+          alert(err.message || "Mise à jour impossible.");
+        }
+      });
+    });
+  }
+
+  function groupBonsByClient(bons) {
+    const map = new Map();
+    (bons || []).forEach((bon) => {
+      const key = String(bon.client_id ?? bon.client_label ?? "");
+      if (!map.has(key)) {
+        map.set(key, {
+          client_id: bon.client_id,
+          label: bon.client_label || `Client #${bon.client_id}`,
+          bons: [],
+        });
+      }
+      map.get(key).bons.push(bon);
+    });
+    return [...map.values()].sort((a, b) =>
+      a.label.localeCompare(b.label, "fr", { sensitivity: "base" })
+    );
+  }
+
+  function renderClientBonRow(group) {
+    const n = group.bons.length;
+    const li = document.createElement("li");
+    const isOpen = String(group.client_id) === String(clientBonsOuvert);
+    li.className = `client-bon-row${isOpen ? " is-expanded" : ""}`;
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    li.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    li.innerHTML = `
+      <div class="client-bon-main">
+        <strong>${escapeHtml(group.label)}</strong>
+        <span class="meta">${n} bon${n > 1 ? "s" : ""} d’intervention</span>
+      </div>
+      <span class="bon-select-chevron" aria-hidden="true">${isOpen ? "▾" : "›"}</span>
+    `;
+    const toggle = () => {
+      clientBonsOuvert =
+        String(clientBonsOuvert) === String(group.client_id)
+          ? null
+          : String(group.client_id);
+      renderListeClientsBons();
+    };
+    li.addEventListener("click", toggle);
+    li.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        toggle();
+      }
+    });
+    return li;
+  }
+
+  function renderBonSelectRow(bon) {
+    const li = document.createElement("li");
+    li.className = `bon-select bon-select--nested${bon.ouvert ? " is-open" : ""}`;
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    const dateBit = bon.date ? formatDateFr(bon.date) : "";
+    const statut = bon.ouvert ? "en cours" : "terminé";
+    const n = Number(bon.nb_lignes || 0);
+    const lignesHint =
+      n === 0
+        ? "Aucune fourniture"
+        : `${n} fourniture${n > 1 ? "s" : ""}`;
+    li.innerHTML = `
+      <div class="bon-select-main">
+        <strong>Bon #${escapeHtml(String(bon.visite_id))} · ${escapeHtml(bon.type_label || "Intervention")}</strong>
+        <span class="meta">${escapeHtml(
+          [dateBit, bon.temps || "", `(${statut})`, lignesHint].filter(Boolean).join(" · ")
+        )}</span>
+      </div>
+      <span class="bon-select-chevron" aria-hidden="true">›</span>
+    `;
+    const open = () => ouvrirBonDetail(bon.visite_id);
+    li.addEventListener("click", open);
+    li.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        open();
+      }
+    });
+    return li;
+  }
+
+  function renderListeClientsBons() {
+    const status = $("#factures-status");
+    const ul = $("#liste-factures");
+    const groups = groupBonsByClient(bonsCache);
+    ul.innerHTML = "";
+    if (!groups.length) {
+      status.textContent = fourniSearchQ
+        ? "Aucun bon pour ce client."
+        : "Aucun bon d’intervention.";
+      ul.innerHTML = '<li class="empty">—</li>';
+      return;
+    }
+    const totalBons = bonsCache.length;
+    status.textContent = `${groups.length} client${groups.length > 1 ? "s" : ""} · ${totalBons} bon${totalBons > 1 ? "s" : ""} — choisis un client`;
+    groups.forEach((group) => {
+      ul.appendChild(renderClientBonRow(group));
+      if (String(group.client_id) === String(clientBonsOuvert)) {
+        group.bons
+          .slice()
+          .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))
+          .forEach((bon) => ul.appendChild(renderBonSelectRow(bon)));
+      }
+    });
+  }
+
+  function renderBonDetailCard(bon) {
+    const li = document.createElement("li");
+    li.className = `bon-card${bon.ouvert ? " is-open" : ""}`;
+    const dateBit = bon.date ? formatDateFr(bon.date) : "";
+    const statut = bon.ouvert ? "en cours" : "terminé";
+    const lines = bon.lignes || [];
+    const ids = lines.map((l) => String(l.id)).join(",");
+    const allEnv = !!bon.envoyee || (lines.length > 0 && lines.every((l) => l.envoyee === "oui"));
+    const allPay = !!bon.payee || (lines.length > 0 && lines.every((l) => l.payee === "oui"));
+    const linesHtml = lines.length
+      ? lines
+          .map(
+            (l) =>
+              `<li><span>${escapeHtml(String(l.quantite))} × ${escapeHtml(l.description)}</span></li>`
+          )
+          .join("")
+      : `<li class="muted">Aucune fourniture sur ce bon.</li>`;
+    li.innerHTML = `
+      <div class="bon-card-head">
+        <strong>${escapeHtml(bon.client_label || "Client")}</strong>
+        <span class="bon-select-type">Bon #${escapeHtml(String(bon.visite_id))} · ${escapeHtml(bon.type_label || "Intervention")}</span>
+        <span class="meta">${escapeHtml(
+          [dateBit, bon.temps || "", `(${statut})`].filter(Boolean).join(" · ")
+        )}</span>
+      </div>
+      <ul class="bon-card-lines">${linesHtml}</ul>
+      ${
+        lines.length
+          ? `<div class="facture-flags">
+        <button type="button" class="flag-btn ${allEnv ? "is-on" : ""}" data-flag="envoyee" data-ids="${escapeHtml(ids)}" aria-pressed="${allEnv}">
+          Envoyée
+        </button>
+        <button type="button" class="flag-btn ${allPay ? "is-on" : ""}" data-flag="payee" data-ids="${escapeHtml(ids)}" aria-pressed="${allPay}">
+          Payée
+        </button>
+      </div>`
+          : ""
+      }
+    `;
+    return li;
+  }
+
+  function renderFactureLooseItem(f) {
+    const li = document.createElement("li");
+    li.className = "facture-item";
+    const envoyee = f.envoyee === "oui";
+    const payee = f.payee === "oui";
+    const dates = f.date_ref
+      ? `${formatDateFr(f.date)} · ${formatDateFr(f.date_ref)}`
+      : formatDateFr(f.date);
+    const line = `${f.quantite} × ${f.description}`;
+    li.innerHTML = `
+      <div class="facture-main">
+        <strong>${escapeHtml(f.client_label || line)}</strong>
+        <span class="hist-text">${escapeHtml(line)}</span>
+        <span class="meta">${escapeHtml(dates)}</span>
+      </div>
+      <div class="facture-flags">
+        <button type="button" class="flag-btn ${envoyee ? "is-on" : ""}" data-flag="envoyee" data-id="${escapeHtml(String(f.id))}" aria-pressed="${envoyee}">
+          Envoyée
+        </button>
+        <button type="button" class="flag-btn ${payee ? "is-on" : ""}" data-flag="payee" data-id="${escapeHtml(String(f.id))}" aria-pressed="${payee}">
+          Payée
+        </button>
+      </div>
+    `;
+    return li;
+  }
+
+  async function ouvrirBonDetail(visiteId, { silent = false } = {}) {
+    const status = $("#factures-status");
+    const ul = $("#liste-factures");
+    if (!silent) {
+      status.textContent = "Chargement…";
+      ul.innerHTML = "";
+      show("factures");
+    }
+    try {
+      let bon = bonsCache.find((b) => Number(b.visite_id) === Number(visiteId));
+      if (!bon || silent) {
+        const params = new URLSearchParams();
+        if (fourniClientId) params.set("client_id", String(fourniClientId));
+        else if (fourniSearchQ) params.set("q", fourniSearchQ);
+        const data = await api(`/api/bons?${params.toString()}`);
+        bonsCache = data.bons || [];
+        bon = bonsCache.find((b) => Number(b.visite_id) === Number(visiteId));
+      }
+      if (!bon) {
+        status.textContent = "Bon introuvable.";
+        ul.innerHTML = '<li class="empty">—</li>';
+        bonSelectionne = null;
+        syncFacturesChrome();
+        return;
+      }
+      bonSelectionne = bon;
+      syncFacturesChrome();
+      const n = Number(bon.nb_lignes || (bon.lignes || []).length || 0);
+      status.textContent =
+        n === 0
+          ? "Aucune fourniture sur ce bon."
+          : `${n} fourniture${n > 1 ? "s" : ""}`;
+      ul.innerHTML = "";
+      ul.appendChild(renderBonDetailCard(bon));
+      appendFactureFlagHandlers(ul);
+    } catch (err) {
+      status.textContent = err.message || "Impossible d’ouvrir le bon.";
+    }
+  }
+
+  async function afficherHorsBon() {
+    const status = $("#factures-status");
+    const ul = $("#liste-factures");
+    status.textContent = "Chargement…";
+    ul.innerHTML = "";
+    syncFacturesChrome();
+    try {
+      const params = new URLSearchParams({ filtre: "toutes" });
+      if (fourniClientId) params.set("client_id", String(fourniClientId));
+      else if (fourniSearchQ) params.set("q", fourniSearchQ);
+      const data = await api(`/api/factures?${params.toString()}`);
+      const items = (data.factures || []).filter((f) => !f.visite_id);
+      if (!items.length) {
+        status.textContent = "Aucune fourniture hors bon.";
+        ul.innerHTML = '<li class="empty">—</li>';
+        return;
+      }
+      status.textContent = `${items.length} fourniture${items.length > 1 ? "s" : ""} hors bon`;
+      let lastClient = null;
+      items.forEach((f) => {
+        const label = f.client_label || "";
+        if (label !== lastClient) {
+          lastClient = label;
+          const head = document.createElement("li");
+          head.className = "agenda-day";
+          head.textContent = label || "Client";
+          ul.appendChild(head);
+        }
+        ul.appendChild(renderFactureLooseItem(f));
+      });
+      appendFactureFlagHandlers(ul);
+    } catch (err) {
+      status.textContent = err.message || "Impossible de charger les fournitures.";
+    }
+  }
+
+  async function afficherFactures(filtre, { keepClient = false } = {}) {
     if (filtre) factureFiltre = filtre;
+    bonSelectionne = null;
+    if (!keepClient) clientBonsOuvert = null;
     show("factures");
     const status = $("#factures-status");
     const ul = $("#liste-factures");
     status.textContent = "Chargement…";
     ul.innerHTML = "";
+    syncFacturesChrome();
 
     $$("#factures-filtres .filtre-chip").forEach((btn) => {
       btn.classList.toggle("is-on", btn.dataset.filtre === factureFiltre);
     });
 
+    if (factureFiltre === "hors_bon") {
+      await afficherHorsBon();
+      return;
+    }
+
     try {
-      const params = new URLSearchParams({ filtre: factureFiltre });
+      const params = new URLSearchParams({
+        statut: factureFiltre === "ouverts" || factureFiltre === "termines" ? factureFiltre : "tous",
+      });
       if (fourniClientId) params.set("client_id", String(fourniClientId));
       else if (fourniSearchQ) params.set("q", fourniSearchQ);
-      const data = await api(`/api/factures?${params.toString()}`);
-      const items = data.factures || [];
-      if (!items.length) {
-        status.textContent = fourniSearchQ
-          ? "Aucune fourniture pour ce client."
-          : "Aucune fourniture pour ce filtre.";
-        ul.innerHTML = '<li class="empty">—</li>';
-        return;
+      const data = await api(`/api/bons?${params.toString()}`);
+      bonsCache = data.bons || [];
+      // Un seul client dans le filtre → déplier directement
+      if (fourniClientId && bonsCache.length) {
+        clientBonsOuvert = String(fourniClientId);
       }
-      status.textContent = `${items.length} fourniture${items.length > 1 ? "s" : ""}`;
-      let lastClient = null;
-      items.forEach((f) => {
-        const label = f.client_label || "";
-        if (fourniSearchQ || fourniClientId) {
-          if (label !== lastClient) {
-            lastClient = label;
-            const head = document.createElement("li");
-            head.className = "agenda-day";
-            head.textContent = label || "Client";
-            ul.appendChild(head);
-          }
-        }
-        const li = document.createElement("li");
-        li.className = "facture-item";
-        const envoyee = f.envoyee === "oui";
-        const payee = f.payee === "oui";
-        const dates = f.date_ref
-          ? `${formatDateFr(f.date)} · ${formatDateFr(f.date_ref)}`
-          : formatDateFr(f.date);
-        const grouped = !!(fourniSearchQ || fourniClientId);
-        const line = `${f.quantite} × ${f.description}`;
-        li.innerHTML = `
-          <div class="facture-main">
-            <strong>${escapeHtml(grouped ? line : f.client_label)}</strong>
-            ${
-              grouped
-                ? ""
-                : `<span class="hist-text">${escapeHtml(line)}</span>`
-            }
-            <span class="meta">${escapeHtml(dates)}</span>
-          </div>
-          <div class="facture-flags">
-            <button type="button" class="flag-btn ${envoyee ? "is-on" : ""}" data-flag="envoyee" data-id="${escapeHtml(String(f.id))}" aria-pressed="${envoyee}">
-              Envoyée
-            </button>
-            <button type="button" class="flag-btn ${payee ? "is-on" : ""}" data-flag="payee" data-id="${escapeHtml(String(f.id))}" aria-pressed="${payee}">
-              Payée
-            </button>
-          </div>
-        `;
-        ul.appendChild(li);
-      });
-
-      $$("[data-flag]", ul).forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          const id = btn.dataset.id;
-          const flag = btn.dataset.flag;
-          const next = btn.getAttribute("aria-pressed") !== "true";
-          try {
-            await api(`/api/factures/${id}`, {
-              method: "PATCH",
-              body: JSON.stringify({ [flag]: next }),
-            });
-            await afficherFactures(factureFiltre);
-          } catch (err) {
-            alert(err.message || "Mise à jour impossible.");
-          }
-        });
-      });
+      renderListeClientsBons();
     } catch (err) {
-      status.textContent = err.message || "Impossible de charger les fournitures.";
+      status.textContent = err.message || "Impossible de charger les bons.";
     }
   }
 
@@ -2181,7 +2452,18 @@
     fourniSearchTimer = setTimeout(() => afficherFactures(factureFiltre), 220);
   });
 
-  $("#btn-factures")?.addEventListener("click", () => afficherFactures("toutes"));
+  $("#btn-factures-back")?.addEventListener("click", () => {
+    if (bonSelectionne) {
+      const cid = bonSelectionne.client_id;
+      bonSelectionne = null;
+      if (cid != null) clientBonsOuvert = String(cid);
+      afficherFactures(factureFiltre, { keepClient: true });
+      return;
+    }
+    show("home");
+  });
+
+  $("#btn-factures")?.addEventListener("click", () => afficherFactures("tous"));
   $$("#factures-filtres .filtre-chip").forEach((btn) => {
     btn.addEventListener("click", () => afficherFactures(btn.dataset.filtre));
   });
@@ -2314,6 +2596,7 @@
       fiche.fournitures,
       (f) => {
         const tags = [];
+        if (f.visite_id) tags.push(`Bon #${f.visite_id}`);
         if ((f.envoyee || "").toLowerCase() === "oui") tags.push("Envoyée");
         if ((f.payee || "").toLowerCase() === "oui") tags.push("Payée");
         const tagHtml = tags.length
@@ -3601,6 +3884,15 @@
         texte: contenu,
         intent_force: detected,
       };
+      // Bon d'intervention ouvert = visite démarrée (Début) pas encore terminée (Fin)
+      if (
+        visiteActive &&
+        visiteActive.debut &&
+        !visiteActive.fin &&
+        Number(visiteActive.client_id) === Number(clientActif.id)
+      ) {
+        payload.visite_id = visiteActive.id;
+      }
       const res = await api("/api/ia", { method: "POST", body: JSON.stringify(payload) });
       if (!res.success) {
         setFeedback($("#ia-feedback"), res.message || "Non compris.", false);
@@ -3623,10 +3915,11 @@
         const d = f.date_ref
           ? `${formatDateFr(f.date)} · ${formatDateFr(f.date_ref)}`
           : formatDateFr(f.date);
+        const bonHint = f.visite_id ? " · bon d’intervention" : "";
         $("#ia-texte").value = `${f.quantite} × ${f.description}`;
         setFeedback(
           $("#ia-feedback"),
-          `Fourniture (${d}) : ${f.quantite} × ${f.description}`,
+          `Fourniture (${d}${bonHint}) : ${f.quantite} × ${f.description}`,
           true
         );
       }
@@ -3893,7 +4186,11 @@
         method: editId ? "PUT" : "POST",
         body: JSON.stringify(payload),
       });
-      const where = client.storage === "supabase" ? "Supabase" : "CSV local";
+      const storHint =
+        client.storage ||
+        document.documentElement.dataset.storage ||
+        "";
+      const where = storHint === "supabase" ? "Supabase" : "CSV local";
       setFeedback(
         $("#nouveau-feedback"),
         editId ? `Client mis à jour (${where}).` : `Client enregistré sur ${where}.`,

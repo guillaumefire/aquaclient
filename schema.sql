@@ -73,7 +73,8 @@ create table if not exists public.fournitures (
   description text default '',
   quantite text default '1',
   envoyee text default 'non',
-  payee text default 'non'
+  payee text default 'non',
+  visite_id text default ''
 );
 
 create table if not exists public.visites (
@@ -90,6 +91,7 @@ create table if not exists public.visites (
 create index if not exists notes_client_id_idx on public.notes(client_id);
 create index if not exists analyses_client_id_idx on public.analyses(client_id);
 create index if not exists fournitures_client_id_idx on public.fournitures(client_id);
+create index if not exists fournitures_visite_id_idx on public.fournitures(visite_id);
 create index if not exists visites_client_id_idx on public.visites(client_id);
 
 -- Accès Data API (clé publishable / anon) depuis le backend AquaClient

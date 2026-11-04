@@ -77,8 +77,8 @@
           <button type="button" class="home-link" id="btn-factures">
             <span class="home-link-ico" aria-hidden="true">◫</span>
             <span class="home-link-text">
-              <span class="home-link-label">Fournitures</span>
-              <span class="home-link-hint">Factures & suivi</span>
+              <span class="home-link-label">Bons & fournitures</span>
+              <span class="home-link-hint">Interventions & suivi</span>
             </span>
           </button>
           <button type="button" class="home-link home-link--wide" id="btn-nouveau">
@@ -186,21 +186,19 @@
     </section>
 
     <section class="screen" id="screen-factures" data-screen>
-      <button type="button" class="back" data-goto="home">← Accueil</button>
+      <button type="button" class="back" id="btn-factures-back">← Accueil</button>
       <p class="eyebrow">Suivi</p>
-      <h2 class="screen-title">Fournitures</h2>
-      <label class="field field--search">
+      <h2 class="screen-title" id="factures-title">Bons d’intervention</h2>
+      <label class="field field--search" id="bloc-fourni-search">
         <span class="visually-hidden">Rechercher un client</span>
         <input type="search" id="input-fourni-search" placeholder="Rechercher un client…" autocomplete="off" />
       </label>
       <p class="muted" id="factures-status">Chargement…</p>
-      <div class="filtre-row" id="factures-filtres" role="tablist" aria-label="Filtres fournitures">
-        <button type="button" class="filtre-chip is-on" data-filtre="toutes">Toutes</button>
-        <button type="button" class="filtre-chip" data-filtre="dernieres">Dernières</button>
-        <button type="button" class="filtre-chip" data-filtre="non_envoyees">À envoyer</button>
-        <button type="button" class="filtre-chip" data-filtre="envoyees">Envoyées</button>
-        <button type="button" class="filtre-chip" data-filtre="non_payees">Impayées</button>
-        <button type="button" class="filtre-chip" data-filtre="payees">Payées</button>
+      <div class="filtre-row" id="factures-filtres" role="tablist" aria-label="Filtres bons">
+        <button type="button" class="filtre-chip is-on" data-filtre="tous">Tous</button>
+        <button type="button" class="filtre-chip" data-filtre="ouverts">En cours</button>
+        <button type="button" class="filtre-chip" data-filtre="termines">Terminés</button>
+        <button type="button" class="filtre-chip" data-filtre="hors_bon">Hors bon</button>
       </div>
       <ul class="list list--factures" id="liste-factures"></ul>
     </section>

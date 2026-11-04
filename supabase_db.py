@@ -24,7 +24,7 @@ TABLE_BY_CSV = {
     "visites.csv": "visites",
 }
 
-INT_FIELDS = {"id", "client_id"}
+INT_FIELDS = {"id", "client_id"}  # visite_id reste texte (CSV / legacy)
 FLOAT_FIELDS = {"latitude", "longitude"}
 
 _client = None
@@ -544,6 +544,13 @@ def init_supabase(
         logger.info("Colonne options_checklists absente → ajout…")
         _ensure_column_via_db(
             "alter table public.clients add column if not exists options_checklists text default '{}';"
+        )
+    try:
+        get_client().table("fournitures").select("visite_id").limit(1).execute()
+    except Exception:
+        logger.info("Colonne fournitures.visite_id absente → ajout…")
+        _ensure_column_via_db(
+            "alter table public.fournitures add column if not exists visite_id text default '';"
         )
     ensure_photos_bucket()
 
