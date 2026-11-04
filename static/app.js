@@ -4,6 +4,8 @@
 
   let clientActif = null;
   let visiteActive = null;
+  /** File d’attente des PATCH checklist (évite les courses entre clics rapides). */
+  let checklistPatchChain = Promise.resolve();
   let plusProcheHorsRayon = null;
   let intentForce = null;
   let gpsOverride = null;
@@ -2711,9 +2713,58 @@
     }
   }
 
+  function applyCheckItemUi(itemId, done) {
+    const id = String(itemId);
+    const btn = $$("#checklist .check-btn").find((b) => b.dataset.item === id);
+    if (!btn) return;
+    const li = btn.closest(".check-item");
+    if (li) li.classList.toggle("is-done", !!done);
+    const mark = $(".check-mark", btn);
+    if (mark) mark.textContent = done ? "✓" : "";
+  }
+
+  function queueChecklistPatch(itemId, done) {
+    const visiteId = visiteActive?.id;
+    if (visiteId == null) return Promise.resolve();
+    checklistPatchChain = checklistPatchChain
+      .catch(() => {})
+      .then(async () => {
+        if (!visiteActive || Number(visiteActive.id) !== Number(visiteId)) return;
+        const res = await api(`/api/visites/${visiteId}/checklist`, {
+          method: "PATCH",
+          body: JSON.stringify({ item_id: itemId, done }),
+        });
+        if (!visiteActive || Number(visiteActive.id) !== Number(visiteId)) return;
+        // Ne remplace PAS toute la checklist (sinon un autre clic local est écrasé).
+        // On aligne seulement l’étape concernée + meta visite (debut/fin…).
+        const localItem = (visiteActive.checklist || []).find((i) => i.id === itemId);
+        const serverItem = (res.checklist || []).find((i) => i.id === itemId);
+        if (localItem && serverItem) {
+          // Si l’utilisateur a recliqué entre-temps, garder l’état local voulu
+          if (btnPendingDone.get(itemId) === undefined) {
+            localItem.done = !!serverItem.done;
+            applyCheckItemUi(itemId, localItem.done);
+          }
+        }
+        visiteActive = {
+          ...visiteActive,
+          debut: res.debut ?? visiteActive.debut,
+          fin: res.fin ?? visiteActive.fin,
+          duree_minutes:
+            res.duree_minutes != null ? res.duree_minutes : visiteActive.duree_minutes,
+        };
+        updateFinButton(visiteActive);
+      });
+    return checklistPatchChain;
+  }
+
+  /** Dernière intention par étape (pour ignorer une réponse obsolète). */
+  const btnPendingDone = new Map();
+
   function renderChecklist(checklist) {
     const ul = $("#checklist");
     ul.innerHTML = "";
+    btnPendingDone.clear();
     checklist.forEach((item) => {
       const li = document.createElement("li");
       li.className = "check-item" + (item.done ? " is-done" : "") + (item.warn ? " is-warn" : "");
@@ -2750,49 +2801,31 @@
 
     $$(".check-btn", ul).forEach((btn) => {
       btn.addEventListener("click", () => {
-        if (!visiteActive || btn.dataset.busy === "1") return;
-        const item = visiteActive.checklist.find((i) => i.id === btn.dataset.item);
+        if (!visiteActive) return;
+        const itemId = btn.dataset.item;
+        const item = visiteActive.checklist.find((i) => i.id === itemId);
         if (!item) return;
         const next = !item.done;
         const prev = !!item.done;
-        // Feedback immédiat (sans attendre Supabase)
+        // Feedback immédiat
         item.done = next;
-        const li = btn.closest(".check-item");
-        if (li) li.classList.toggle("is-done", next);
-        const mark = $(".check-mark", btn);
-        if (mark) mark.textContent = next ? "✓" : "";
+        btnPendingDone.set(itemId, next);
+        applyCheckItemUi(itemId, next);
         updateFinButton(visiteActive);
         setFeedback($("#check-feedback"), "", null);
-        btn.dataset.busy = "1";
-        api(`/api/visites/${visiteActive.id}/checklist`, {
-          method: "PATCH",
-          body: JSON.stringify({ item_id: btn.dataset.item, done: next }),
-        })
-          .then((res) => {
-            const photosById = Object.fromEntries(
-              (visiteActive.checklist || []).map((i) => [i.id, i.photos])
-            );
-            const checklist = (res.checklist || []).map((i) => ({
-              ...i,
-              photos: i.photos || photosById[i.id] || [],
-            }));
-            visiteActive = {
-              ...visiteActive,
-              ...res,
-              client: visiteActive.client,
-              checklist,
-            };
-            updateFinButton(visiteActive);
+        queueChecklistPatch(itemId, next)
+          .then(() => {
+            if (btnPendingDone.get(itemId) === next) btnPendingDone.delete(itemId);
           })
           .catch((err) => {
-            item.done = prev;
-            if (li) li.classList.toggle("is-done", prev);
-            if (mark) mark.textContent = prev ? "✓" : "";
+            // Ne rollback que si l’intention n’a pas changé entre-temps
+            if (btnPendingDone.get(itemId) !== next) return;
+            btnPendingDone.delete(itemId);
+            const cur = visiteActive?.checklist?.find((i) => i.id === itemId);
+            if (cur) cur.done = prev;
+            applyCheckItemUi(itemId, prev);
             updateFinButton(visiteActive);
-            setFeedback($("#check-feedback"), err.message, false);
-          })
-          .finally(() => {
-            delete btn.dataset.busy;
+            setFeedback($("#check-feedback"), err.message || "Mise à jour impossible.", false);
           });
       });
     });

@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.11.3"
+APP_VERSION = "1.11.4"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -3258,35 +3258,59 @@ def fin_prestation(visite_id: int):
 
 @app.patch("/api/visites/{visite_id}/checklist")
 def update_checklist(visite_id: int, body: ChecklistUpdate):
-    r = read_visite_row(visite_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Visite introuvable")
-    checklist = json.loads(r.get("checklist_json") or "[]")
-    by_id = {i["id"]: i for i in checklist}
-    if body.item_id == "lavage_filtre" and body.done:
-        if "vanne_ouvrir" in by_id and not by_id["vanne_ouvrir"].get("done"):
-            raise HTTPException(
-                status_code=400,
-                detail="Ouvrez d'abord la vanne de vidange avant le lavage du filtre.",
-            )
-    if body.item_id == "vanne_fermer" and body.done:
-        if "lavage_filtre" in by_id and not by_id["lavage_filtre"].get("done"):
-            raise HTTPException(
-                status_code=400,
-                detail="Faites d'abord le lavage du filtre avant de fermer la vanne.",
-            )
-    found = False
-    for item in checklist:
-        if item["id"] == body.item_id:
-            item["done"] = body.done
-            found = True
-            break
-    if not found:
-        raise HTTPException(status_code=404, detail="Étape introuvable")
-    r["checklist_json"] = json.dumps(checklist, ensure_ascii=False)
-    write_one_row(VISITES_CSV, VISITE_FIELDS, r)
-    # Réponse légère : pas de rechargement photos / client
-    return _visite_payload(r, include_client=False, include_photos=False)
+    """
+    Coche/décoche une étape. Relecture + réessai pour éviter qu'un 2e clic
+    concurrent n'écrase la 1re case (course Supabase).
+    """
+    last_detail = "Étape introuvable"
+    for _attempt in range(5):
+        r = read_visite_row(visite_id)
+        if not r:
+            raise HTTPException(status_code=404, detail="Visite introuvable")
+        try:
+            checklist = json.loads(r.get("checklist_json") or "[]")
+        except json.JSONDecodeError:
+            checklist = []
+        by_id = {i["id"]: i for i in checklist if isinstance(i, dict) and "id" in i}
+        if body.item_id == "lavage_filtre" and body.done:
+            if "vanne_ouvrir" in by_id and not by_id["vanne_ouvrir"].get("done"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Ouvrez d'abord la vanne de vidange avant le lavage du filtre.",
+                )
+        if body.item_id == "vanne_fermer" and body.done:
+            if "lavage_filtre" in by_id and not by_id["lavage_filtre"].get("done"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Faites d'abord le lavage du filtre avant de fermer la vanne.",
+                )
+        found = False
+        for item in checklist:
+            if not isinstance(item, dict):
+                continue
+            if item.get("id") == body.item_id:
+                item["done"] = bool(body.done)
+                found = True
+                break
+        if not found:
+            raise HTTPException(status_code=404, detail="Étape introuvable")
+        r["checklist_json"] = json.dumps(checklist, ensure_ascii=False)
+        write_one_row(VISITES_CSV, VISITE_FIELDS, r)
+
+        # Vérifie que notre case a bien persisté (sinon conflit → retry)
+        verify = read_visite_row(visite_id) or r
+        try:
+            check2 = json.loads(verify.get("checklist_json") or "[]")
+        except json.JSONDecodeError:
+            check2 = []
+        item2 = next(
+            (i for i in check2 if isinstance(i, dict) and i.get("id") == body.item_id),
+            None,
+        )
+        if item2 is not None and bool(item2.get("done")) == bool(body.done):
+            return _visite_payload(verify, include_client=False, include_photos=False)
+        last_detail = "Conflit de mise à jour checklist"
+    raise HTTPException(status_code=409, detail=f"{last_detail} — réessayez.")
 
 
 @app.post("/api/ia")
