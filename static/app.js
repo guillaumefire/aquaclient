@@ -3466,6 +3466,53 @@
     }, delay);
   }
 
+  function normVoiceChunk(s) {
+    return String(s || "")
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^\w\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function mergeVoiceChunks(prev, next) {
+    const a = String(prev || "").trim();
+    const b = String(next || "").trim();
+    if (!a) return b;
+    if (!b) return a;
+    const na = normVoiceChunk(a);
+    const nb = normVoiceChunk(b);
+    // Nouvelle phrase plus complète qui contient l’ancienne
+    if (nb.includes(na)) return b;
+    // Ancienne déjà plus complète
+    if (na.includes(nb)) return a;
+    // Chevauchement de fin/début (ex. « fourniture 2 bidon » + « bidon de chlore »)
+    const aWords = na.split(" ").filter(Boolean);
+    const bWords = nb.split(" ").filter(Boolean);
+    let overlap = 0;
+    const max = Math.min(aWords.length, bWords.length);
+    for (let k = max; k >= 1; k--) {
+      if (aWords.slice(-k).join(" ") === bWords.slice(0, k).join(" ")) {
+        overlap = k;
+        break;
+      }
+    }
+    if (overlap > 0) {
+      const aRaw = a.split(/\s+/).filter(Boolean);
+      const bRaw = b.split(/\s+/).filter(Boolean);
+      return [...aRaw, ...bRaw.slice(overlap)].join(" ");
+    }
+    // Doublon quantité+unité : garder la version la plus longue / détaillée
+    const qtyUnit = /^(.+?\b)(\d+(?:[.,]\d+)?)\s+(?:fois\s+|x\s+)?(bidon|sac|seau|cartouche|litre|paquet|chlore|brome)\b/i;
+    const ma = a.match(qtyUnit);
+    const mb = b.match(qtyUnit);
+    if (ma && mb && ma[2] === mb[2] && ma[3].toLowerCase() === mb[3].toLowerCase()) {
+      return b.length >= a.length ? b : a;
+    }
+    return `${a} ${b}`.trim();
+  }
+
   function startSpeechRec() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return false;
@@ -3535,8 +3582,9 @@
       const txt = finalTxt.trim();
       if (!txt) return;
 
-      // Accumuler toute la phrase (ne pas écrire tant que ce n’est pas complet)
-      voicePhraseBuffer = `${voicePhraseBuffer} ${txt}`.trim();
+      // Fusion intelligente : le micro renvoie souvent « 2 bidon » puis
+      // « 2 fois bidon de chlore » → éviter « 2 bidon 2 fois bidon… »
+      voicePhraseBuffer = mergeVoiceChunks(voicePhraseBuffer, txt);
       if (voicePhraseTimer) clearTimeout(voicePhraseTimer);
 
       const hasKeyword = !!(detectWakeIntent(voicePhraseBuffer) || armedIntent);

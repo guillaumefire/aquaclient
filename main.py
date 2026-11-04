@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.11.2"
+APP_VERSION = "1.11.3"
 
 PHOTOS_BUCKET = "photos-clients"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
@@ -2041,9 +2041,82 @@ def _singulariser_unite(mot: str) -> str:
     return mapping.get(m, m.rstrip("s"))
 
 
+def _dedupe_quantite_orale(texte: str) -> str:
+    """
+    Corrige les doublons du micro : « 2 bidon 2 fois bidon de chlore »
+    → « 2 bidon de chlore ».
+    """
+    t = re.sub(r"\s+", " ", (texte or "").strip())
+    if not t:
+        return t
+    unites = (
+        r"bidons?|sacs?|seaux?|cartouches?|litres?|kg|paquets?|boites?|boîtes?|"
+        r"chlore|brome|sel|sable|floculant|algicide"
+    )
+    # « 2 bidon 2 fois bidon … » / « 2 bidon 2 x bidon … » / « 2 bidon 2 bidon … »
+    t = re.sub(
+        rf"\b(\d+(?:[.,]\d+)?)\s+({unites})\b(?:\s+\1\s*(?:x|fois)?\s+\2\b)+",
+        r"\1 \2",
+        t,
+        flags=re.I,
+    )
+    # « 2 fois 2 bidon » → « 2 bidon »
+    t = re.sub(
+        rf"\b(\d+(?:[.,]\d+)?)\s*(?:x|fois)\s+\1\s+({unites})\b",
+        r"\1 \2",
+        t,
+        flags=re.I,
+    )
+    # « 2 fois bidon » → « 2 bidon »
+    t = re.sub(
+        rf"\b(\d+(?:[.,]\d+)?)\s*(?:x|fois)\s+({unites})\b",
+        r"\1 \2",
+        t,
+        flags=re.I,
+    )
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _nettoyer_desc_apres_qty(desc: str, qty: float) -> str:
+    """Enlève les restes de quantité dans la description (chiffre, x, fois…)."""
+    d = (desc or "").strip()
+    if not d:
+        return d
+    qty_int = int(qty) if float(qty).is_integer() else None
+    variants = [re.escape(str(qty).replace(".", "[.,]"))]
+    if qty_int is not None:
+        variants.append(str(qty_int))
+    qty_alt = "|".join(variants)
+    # En tête : « 2 fois », « 2 x », « 2 »
+    d = re.sub(rf"^(?:{qty_alt})\s*(?:x|fois)?\s*", "", d, flags=re.I)
+    d = re.sub(r"^\d+(?:[.,]\d+)?\s*(?:x|fois)?\s*", "", d, flags=re.I)
+    # Au milieu : « … 2 fois … » orphelin
+    d = re.sub(rf"\b(?:{qty_alt})\s*(?:x|fois)\b", " ", d, flags=re.I)
+    d = re.sub(r"\b\d+(?:[.,]\d+)?\s*(?:x|fois)\b", " ", d, flags=re.I)
+    # Unité répétée : « bidon … bidon de chlore » → garder la forme la plus complète
+    unites = (
+        r"bidon|sac|seau|cartouche|litre|kg|paquet|boite|boîte|"
+        r"chlore|brome|sel|sable|floculant|algicide"
+    )
+    m = re.search(
+        rf"\b({unites})s?\b(?:\s+de\s+\w+)?(?:\s+\w+){{0,3}}\s*$",
+        d,
+        flags=re.I,
+    )
+    if m and re.search(rf"\b{re.escape(m.group(1))}s?\b", d[: m.start()], flags=re.I):
+        # Garde à partir de la dernière occurrence d'unité (+ complément)
+        last = None
+        for mm in re.finditer(rf"\b({unites})s?\b", d, flags=re.I):
+            last = mm
+        if last:
+            d = d[last.start() :].strip()
+    d = re.sub(r"\s+", " ", d).strip(" ,.-")
+    return d
+
+
 def _extraire_quantite(texte: str) -> tuple[float, str]:
     """Trouve une quantité n'importe où : « j'ai mis 2 bidons de chlore »."""
-    t = texte or ""
+    t = _dedupe_quantite_orale(texte or "")
     # « de/des bidon » en tête = souvent « deux » mal reconnu
     t = re.sub(
         r"^(de|des|du)\s+(bidon|sac|seau|cartouche|litre|paquet|boite|boîte)\b",
@@ -2075,26 +2148,27 @@ def _extraire_quantite(texte: str) -> tuple[float, str]:
         avant = t[: m.start()].strip()
         apres = t[m.end() :].strip()
         desc = " ".join(p for p in (avant, unite, apres) if p)
-        desc = re.sub(r"\s+", " ", desc).strip(" ,.-")
+        desc = _nettoyer_desc_apres_qty(re.sub(r"\s+", " ", desc).strip(" ,.-"), qty)
         return qty, desc
 
     m = re.search(r"\b(\d+(?:[.,]\d+)?)\s*(?:x|fois)\b", low)
     if m:
         qty = float(m.group(1).replace(",", "."))
         desc = (t[: m.start()] + " " + t[m.end() :]).strip()
-        return qty, re.sub(r"\s+", " ", desc).strip(" ,.-")
+        desc = _nettoyer_desc_apres_qty(re.sub(r"\s+", " ", desc).strip(" ,.-"), qty)
+        return qty, desc
 
     m = re.match(r"^(?:x\s*)?(\d+(?:[.,]\d+)?)\s+(?:x\s+)?(.+)$", low)
     if m:
         qty = float(m.group(1).replace(",", "."))
-        desc = t[m.start(2) : m.end(2)].strip()
+        desc = _nettoyer_desc_apres_qty(t[m.start(2) : m.end(2)].strip(), qty)
         return qty, desc
 
     # Chiffre seul en tête + reste sans unité collée : « 2 chlore liquide »
     m = re.match(r"^(\d+(?:[.,]\d+)?)\s+(.+)$", low)
     if m and not re.match(r"^\d", m.group(2)):
         qty = float(m.group(1).replace(",", "."))
-        desc = t[m.start(2) : m.end(2)].strip()
+        desc = _nettoyer_desc_apres_qty(t[m.start(2) : m.end(2)].strip(), qty)
         if desc:
             return qty, desc
 

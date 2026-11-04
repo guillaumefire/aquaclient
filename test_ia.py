@@ -24,7 +24,7 @@ def test_fourniture_orale():
     r = parse_commande("fourniture 3 bidon de chlore")
     assert r["ok"] and r["intent"] == "fourniture"
     assert r["quantite"] == 3
-    assert "chlore" in r["description"].lower()
+    assert r["description"].lower() == "bidon de chlore"
     assert r["date_ref"] == ""
 
     r2 = parse_commande("trois bidons de chlore")
@@ -32,6 +32,12 @@ def test_fourniture_orale():
 
     r3 = parse_commande(corriger_transcription("furniture 3 biden de clore"))
     assert r3["ok"] and r3["quantite"] == 3
+
+    # Doublon micro téléphone : « 2 bidon » + « 2 fois bidon de chlore »
+    r4 = parse_commande("fourniture 2 bidon 2 fois bidon de chlore")
+    assert r4["ok"] and r4["quantite"] == 2
+    assert r4["description"].lower() == "bidon de chlore"
+    assert "fois" not in r4["description"].lower()
 
 
 def test_analyse():
