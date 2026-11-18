@@ -1840,27 +1840,35 @@
     }
     if (!textarea) return;
     stopDepSpeech();
-    releaseSharedMic?.();
+    try {
+      releaseSharedMic();
+    } catch {
+      /* ignore */
+    }
+    const base = (textarea.value || "").trim();
+    textarea.dataset.base = base;
     const rec = new SR();
     depSpeechRec = rec;
     rec.lang = "fr-FR";
     rec.continuous = false;
     rec.interimResults = true;
-    let finalText = "";
+    rec.maxAlternatives = 1;
     if (btn) {
       btn.disabled = true;
       btn.textContent = "Écoute…";
     }
     setFeedback($("#dep-feedback"), "Parlez maintenant…", null);
+    // Toujours reconstruire depuis TOUS les résultats (évite les doublons interim/final)
     rec.onresult = (ev) => {
+      let finalPart = "";
       let interim = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const t = ev.results[i][0].transcript || "";
-        if (ev.results[i].isFinal) finalText += `${t} `;
-        else interim += t;
+      for (let i = 0; i < ev.results.length; i++) {
+        const t = (ev.results[i][0]?.transcript || "").trim();
+        if (!t) continue;
+        if (ev.results[i].isFinal) finalPart += `${t} `;
+        else interim += `${t} `;
       }
-      const base = (textarea.dataset.base || textarea.value || "").trim();
-      const spoken = `${finalText} ${interim}`.trim();
+      const spoken = collapseRepeatedSpeech(`${finalPart} ${interim}`.trim());
       textarea.value = [base, spoken].filter(Boolean).join(" ").trim();
     };
     rec.onerror = () => {
@@ -1876,16 +1884,18 @@
         btn.disabled = false;
         btn.textContent = "Parler";
       }
+      const cleaned = collapseRepeatedSpeech((textarea.value || "").trim());
+      textarea.value = cleaned;
       delete textarea.dataset.base;
-      const spoken = (textarea.value || "").trim();
       setFeedback(
         $("#dep-feedback"),
-        spoken ? "Texte ajouté — vous pouvez corriger puis Ajouter." : "Rien entendu.",
-        !!spoken
+        cleaned && cleaned !== base
+          ? "Texte ajouté — vous pouvez corriger puis Ajouter."
+          : "Rien entendu.",
+        !!(cleaned && cleaned !== base)
       );
       depSpeechRec = null;
     };
-    textarea.dataset.base = (textarea.value || "").trim();
     try {
       rec.start();
     } catch (err) {
@@ -3964,6 +3974,7 @@
     );
 
     out = normaliserNombresOraux(out);
+    out = collapseRepeatedSpeech(out);
     return out.replace(/\s+/g, " ").trim();
   }
 
@@ -4351,13 +4362,48 @@
       .trim();
   }
 
+  function collapseRepeatedSpeech(text) {
+    let t = String(text || "").replace(/\s+/g, " ").trim();
+    if (!t) return "";
+    // Phrase entière doublée : « foo bar foo bar » → « foo bar »
+    for (let pass = 0; pass < 3; pass++) {
+      const words = t.split(" ").filter(Boolean);
+      if (words.length < 2) break;
+      let changed = false;
+      if (words.length >= 2 && words.length % 2 === 0) {
+        const mid = words.length / 2;
+        const left = words.slice(0, mid).join(" ");
+        const right = words.slice(mid).join(" ");
+        if (normVoiceChunk(left) === normVoiceChunk(right)) {
+          t = left;
+          changed = true;
+        }
+      }
+      // Mot / bigramme répété à la suite
+      t = t.replace(/\b([\wÀ-ÿ'’-]{2,})(?:\s+\1\b)+/gi, "$1");
+      t = t.replace(
+        /\b([\wÀ-ÿ'’-]+\s+[\wÀ-ÿ'’-]+)(?:\s+\1\b)+/gi,
+        "$1"
+      );
+      // « 2 bidon 2 bidon » / « 2 bidon 2 fois bidon »
+      t = t.replace(
+        /\b(\d+(?:[.,]\d+)?)\s+([\wÀ-ÿ'’-]+)(?:\s+\1\s*(?:x|fois)?\s+\2\b)+/gi,
+        "$1 $2"
+      );
+      if (!changed && t === words.join(" ")) break;
+    }
+    return t.replace(/\s+/g, " ").trim();
+  }
+
   function mergeVoiceChunks(prev, next) {
-    const a = String(prev || "").trim();
-    const b = String(next || "").trim();
+    const a = collapseRepeatedSpeech(prev);
+    const b = collapseRepeatedSpeech(next);
     if (!a) return b;
     if (!b) return a;
     const na = normVoiceChunk(a);
     const nb = normVoiceChunk(b);
+    // Identique / quasi identique
+    if (na === nb) return a.length >= b.length ? a : b;
     // Nouvelle phrase plus complète qui contient l’ancienne
     if (nb.includes(na)) return b;
     // Ancienne déjà plus complète
@@ -4376,16 +4422,17 @@
     if (overlap > 0) {
       const aRaw = a.split(/\s+/).filter(Boolean);
       const bRaw = b.split(/\s+/).filter(Boolean);
-      return [...aRaw, ...bRaw.slice(overlap)].join(" ");
+      return collapseRepeatedSpeech([...aRaw, ...bRaw.slice(overlap)].join(" "));
     }
     // Doublon quantité+unité : garder la version la plus longue / détaillée
-    const qtyUnit = /^(.+?\b)(\d+(?:[.,]\d+)?)\s+(?:fois\s+|x\s+)?(bidon|sac|seau|cartouche|litre|paquet|chlore|brome)\b/i;
+    const qtyUnit =
+      /^(.+?\b)?(\d+(?:[.,]\d+)?)\s+(?:fois\s+|x\s+)?(bidon|sac|seau|cartouche|litre|paquet|chlore|brome)\b/i;
     const ma = a.match(qtyUnit);
     const mb = b.match(qtyUnit);
     if (ma && mb && ma[2] === mb[2] && ma[3].toLowerCase() === mb[3].toLowerCase()) {
       return b.length >= a.length ? b : a;
     }
-    return `${a} ${b}`.trim();
+    return collapseRepeatedSpeech(`${a} ${b}`);
   }
 
   function startSpeechRec() {
@@ -4400,11 +4447,14 @@
     // Écoute continue pour attraper « fourniture 2 bidons… » d’un coup
     rec.continuous = true;
     rec.interimResults = true;
-    rec.maxAlternatives = 3;
+    rec.maxAlternatives = 1;
+    // Buffer déjà accumulé avant ce cycle (redémarrages micro)
+    const bufferAtStart = voicePhraseBuffer;
 
     const flushPhraseBuffer = () => {
       voicePhraseTimer = null;
-      const buffered = voicePhraseBuffer.trim();
+      const buffered = collapseRepeatedSpeech(voicePhraseBuffer);
+      voicePhraseBuffer = buffered;
       if (!buffered || holdRecording || processingVocal) return;
 
       const intent = detectWakeIntent(buffered) || armedIntent;
@@ -4448,23 +4498,23 @@
     rec.onresult = (event) => {
       if (holdRecording || processingVocal) return;
 
-      let finalTxt = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const piece = event.results[i][0]?.transcript || "";
-        if (event.results[i].isFinal) finalTxt += piece;
+      // Reconstruire toute la session courante (pas d’append incrémental → pas de doublons)
+      let sessionFinal = "";
+      for (let i = 0; i < event.results.length; i++) {
+        if (!event.results[i].isFinal) continue;
+        const piece = (event.results[i][0]?.transcript || "").trim();
+        if (piece) sessionFinal += `${piece} `;
       }
-
-      const txt = finalTxt.trim();
+      const txt = collapseRepeatedSpeech(sessionFinal);
       if (!txt) return;
 
-      // Fusion intelligente : le micro renvoie souvent « 2 bidon » puis
-      // « 2 fois bidon de chlore » → éviter « 2 bidon 2 fois bidon… »
-      voicePhraseBuffer = mergeVoiceChunks(voicePhraseBuffer, txt);
+      voicePhraseBuffer = mergeVoiceChunks(bufferAtStart, txt);
       if (voicePhraseTimer) clearTimeout(voicePhraseTimer);
 
       const hasKeyword = !!(detectWakeIntent(voicePhraseBuffer) || armedIntent);
       if (!hasKeyword) {
-        voicePhraseBuffer = "";
+        // Hors mot-clé : on n’accumule pas le bruit de fond
+        voicePhraseBuffer = bufferAtStart;
         return;
       }
 
