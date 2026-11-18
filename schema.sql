@@ -3,6 +3,7 @@ create table if not exists public.clients (
   id bigint primary key,
   nom text not null default '',
   prenom text not null default '',
+  entite text not null default 'particulier',
   adresse text not null default '',
   latitude double precision,
   longitude double precision,
@@ -38,6 +39,7 @@ alter table public.clients add column if not exists checklist_hivernage text def
 alter table public.clients add column if not exists piscine_hivernee text default '0';
 alter table public.clients add column if not exists hivernage_en_cours text default '0';
 alter table public.clients add column if not exists options_checklists text default '{}';
+alter table public.clients add column if not exists entite text default 'particulier';
 
 create unique index if not exists clients_identifiant_uidx
   on public.clients (identifiant)
@@ -94,6 +96,19 @@ create index if not exists fournitures_client_id_idx on public.fournitures(clien
 create index if not exists fournitures_visite_id_idx on public.fournitures(visite_id);
 create index if not exists visites_client_id_idx on public.visites(client_id);
 
+create table if not exists public.accessoires (
+  id bigint primary key,
+  categorie text default '',
+  marque text default '',
+  modele text default '',
+  notice_path text default '',
+  notice_name text default '',
+  notice_mime text default '',
+  created_at text default ''
+);
+
+create index if not exists accessoires_categorie_idx on public.accessoires(categorie);
+
 -- Accès Data API (clé publishable / anon) depuis le backend AquaClient
 grant usage on schema public to anon, authenticated, service_role;
 grant all on table public.clients to anon, authenticated, service_role;
@@ -101,12 +116,14 @@ grant all on table public.notes to anon, authenticated, service_role;
 grant all on table public.analyses to anon, authenticated, service_role;
 grant all on table public.fournitures to anon, authenticated, service_role;
 grant all on table public.visites to anon, authenticated, service_role;
+grant all on table public.accessoires to anon, authenticated, service_role;
 
 alter table public.clients enable row level security;
 alter table public.notes enable row level security;
 alter table public.analyses enable row level security;
 alter table public.fournitures enable row level security;
 alter table public.visites enable row level security;
+alter table public.accessoires enable row level security;
 
 drop policy if exists aquaclient_clients_all on public.clients;
 create policy aquaclient_clients_all on public.clients
@@ -126,6 +143,10 @@ create policy aquaclient_fournitures_all on public.fournitures
 
 drop policy if exists aquaclient_visites_all on public.visites;
 create policy aquaclient_visites_all on public.visites
+  for all to anon, authenticated using (true) with check (true);
+
+drop policy if exists aquaclient_accessoires_all on public.accessoires;
+create policy aquaclient_accessoires_all on public.accessoires
   for all to anon, authenticated using (true) with check (true);
 
 -- Photos associées aux instructions hivernage (métadonnées)
@@ -188,3 +209,38 @@ drop policy if exists photos_clients_storage_delete on storage.objects;
 create policy photos_clients_storage_delete on storage.objects
   for delete to anon, authenticated, service_role
   using (bucket_id = 'photos-clients');
+
+-- Notices PDF accessoires
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'notices-accessoires',
+  'notices-accessoires',
+  false,
+  15728640,
+  array['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'application/octet-stream']
+)
+on conflict (id) do update set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists notices_accessoires_storage_select on storage.objects;
+create policy notices_accessoires_storage_select on storage.objects
+  for select to anon, authenticated, service_role
+  using (bucket_id = 'notices-accessoires');
+
+drop policy if exists notices_accessoires_storage_insert on storage.objects;
+create policy notices_accessoires_storage_insert on storage.objects
+  for insert to anon, authenticated, service_role
+  with check (bucket_id = 'notices-accessoires');
+
+drop policy if exists notices_accessoires_storage_update on storage.objects;
+create policy notices_accessoires_storage_update on storage.objects
+  for update to anon, authenticated, service_role
+  using (bucket_id = 'notices-accessoires')
+  with check (bucket_id = 'notices-accessoires');
+
+drop policy if exists notices_accessoires_storage_delete on storage.objects;
+create policy notices_accessoires_storage_delete on storage.objects
+  for delete to anon, authenticated, service_role
+  using (bucket_id = 'notices-accessoires');

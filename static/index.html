@@ -81,6 +81,13 @@
               <span class="home-link-hint">Interventions & suivi</span>
             </span>
           </button>
+          <button type="button" class="home-link" id="btn-accessoires">
+            <span class="home-link-ico" aria-hidden="true">⚙</span>
+            <span class="home-link-text">
+              <span class="home-link-label">Accessoires</span>
+              <span class="home-link-hint">Catalogue & notices</span>
+            </span>
+          </button>
           <button type="button" class="home-link home-link--wide" id="btn-nouveau">
             <span class="home-link-ico home-link-ico--plus" aria-hidden="true">+</span>
             <span class="home-link-text">
@@ -112,14 +119,30 @@
 
     <section class="screen" id="screen-type" data-screen>
       <button type="button" class="back" id="btn-back-type">← Retour</button>
-      <p class="eyebrow">Type d’intervention</p>
+      <p class="eyebrow">Intervention</p>
       <h2 class="screen-title" id="type-client-name">—</h2>
-      <p class="muted">Choisissez le type de visite</p>
-      <div class="actions">
+      <p class="muted" id="type-client-meta">Que souhaitez-vous faire ?</p>
+
+      <div id="type-menu-root" class="actions type-menu">
+        <button type="button" class="btn btn--primary" data-action="ouverture" id="btn-action-ouverture">
+          Ouverture
+        </button>
+        <button type="button" class="btn btn--primary" data-action="entretien">Entretien</button>
+        <button type="button" class="btn btn--ghost" data-action="depannage">Dépannage</button>
+        <button type="button" class="btn btn--ghost" data-action="hivernage" id="btn-action-hivernage">
+          Hivernage
+        </button>
+        <button type="button" class="btn btn--ghost" data-action="divers">Divers</button>
+      </div>
+
+      <div id="type-menu-entretien" class="actions type-menu" hidden>
         <button type="button" class="btn btn--primary" data-visite="entretien_simple">Entretien classique</button>
         <button type="button" class="btn btn--ghost" data-visite="entretien_complet">Entretien complet</button>
-        <button type="button" class="btn btn--ghost" data-visite="depannage">Dépannage</button>
-        <button type="button" class="btn btn--ghost" data-visite="hivernage">Hivernage</button>
+      </div>
+
+      <div id="type-menu-divers" class="actions type-menu" hidden>
+        <button type="button" class="btn btn--primary" data-visite="fourniture">Fourniture</button>
+        <button type="button" class="btn btn--ghost" data-visite="devis">Devis</button>
       </div>
     </section>
 
@@ -185,6 +208,46 @@
       <ul class="list list--agenda" id="liste-agenda"></ul>
     </section>
 
+    <section class="screen" id="screen-accessoires" data-screen>
+      <button type="button" class="back" data-goto="home">← Accueil</button>
+      <p class="eyebrow">Catalogue</p>
+      <h2 class="screen-title">Accessoires</h2>
+      <p class="muted">Catégorie (pompe, filtre…) → marque & modèle + notice PDF.</p>
+      <form id="form-accessoire" class="form form--compact">
+        <label class="field">
+          <span>Catégorie / genre</span>
+          <input list="liste-categories-acc" id="acc-categorie" name="categorie" required placeholder="Pompe, Filtre…" autocomplete="off" />
+          <datalist id="liste-categories-acc"></datalist>
+        </label>
+        <div class="gps-row">
+          <label class="field">
+            <span>Marque</span>
+            <input id="acc-marque" name="marque" required placeholder="Speedeo…" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Modèle</span>
+            <input id="acc-modele" name="modele" placeholder="1.5 CV…" autocomplete="off" />
+          </label>
+        </div>
+        <label class="field">
+          <span>Notice (PDF)</span>
+          <input type="file" id="acc-notice" accept=".pdf,application/pdf,image/*" />
+        </label>
+        <input type="hidden" id="acc-edit-id" value="" />
+        <div class="actions actions--row">
+          <button type="submit" class="btn btn--primary" id="btn-save-accessoire">Ajouter</button>
+          <button type="button" class="btn btn--ghost" id="btn-reset-accessoire" hidden>Annuler</button>
+        </div>
+        <p class="ia-feedback" id="accessoires-feedback" role="status"></p>
+      </form>
+      <label class="field field--search">
+        <span class="visually-hidden">Rechercher</span>
+        <input type="search" id="input-acc-search" placeholder="Rechercher marque, modèle…" autocomplete="off" />
+      </label>
+      <p class="muted" id="accessoires-status">Chargement…</p>
+      <ul class="list list--factures" id="liste-accessoires"></ul>
+    </section>
+
     <section class="screen" id="screen-factures" data-screen>
       <button type="button" class="back" id="btn-factures-back">← Accueil</button>
       <p class="eyebrow">Suivi</p>
@@ -205,8 +268,8 @@
 
     <section class="screen" id="screen-visite" data-screen>
       <div class="visite-top">
-        <button type="button" class="back" data-goto="home">← Accueil</button>
-        <div class="visite-top-actions">
+        <button type="button" class="back" id="btn-back-visite">← Interventions</button>
+        <div class="visite-top-actions" hidden>
           <button type="button" class="btn btn--ghost btn--sm" id="btn-depannage-visite">Dépannage</button>
           <button type="button" class="btn btn--ghost btn--sm" id="btn-hivernage-visite">Hivernage</button>
         </div>
@@ -221,16 +284,45 @@
         <p class="chrono-status" id="chrono-status">Pas encore démarré</p>
       </div>
 
-      <h3 class="list-title">Check-up</h3>
+      <h3 class="list-title" id="visite-checkup-title">Check-up</h3>
       <button type="button" class="btn btn--primary btn--block" id="btn-debut">Début</button>
       <ul class="checklist" id="checklist"></ul>
+
+      <div id="bloc-depannage-visite" class="depannage-panel" hidden>
+        <section class="dep-zone">
+          <h3 class="list-title">Travaux à prévoir</h3>
+          <label class="field">
+            <span class="visually-hidden">Travaux à prévoir</span>
+            <textarea id="dep-travaux-texte" rows="3" placeholder="Ex. changer le joint de vanne…" inputmode="text" autocomplete="off"></textarea>
+          </label>
+          <div class="actions actions--row">
+            <button type="button" class="btn btn--ghost" id="btn-dep-travaux-parler">Parler</button>
+            <button type="button" class="btn btn--primary" id="btn-dep-travaux-ajouter">Ajouter</button>
+          </div>
+          <ul class="list" id="liste-dep-travaux"></ul>
+        </section>
+        <section class="dep-zone">
+          <h3 class="list-title">Fourniture</h3>
+          <label class="field">
+            <span class="visually-hidden">Fourniture</span>
+            <textarea id="dep-fourniture-texte" rows="3" placeholder="Ex. 2 bidons de chlore…" inputmode="text" autocomplete="off"></textarea>
+          </label>
+          <div class="actions actions--row">
+            <button type="button" class="btn btn--ghost" id="btn-dep-fourniture-parler">Parler</button>
+            <button type="button" class="btn btn--primary" id="btn-dep-fourniture-ajouter">Ajouter</button>
+          </div>
+          <ul class="list" id="liste-dep-fournitures"></ul>
+        </section>
+        <p class="ia-feedback" id="dep-feedback" role="status"></p>
+      </div>
+
       <button type="button" class="btn btn--ghost btn--block" id="btn-fin" disabled>
-        Terminer
+        Fin
       </button>
       <p class="muted" id="fin-hint">Appuyez sur Début pour démarrer la prestation.</p>
       <p class="ia-feedback" id="check-feedback" role="status"></p>
 
-      <div class="ia-panel">
+      <div class="ia-panel" id="visite-ia-panel">
         <div class="ia-header">
           <span class="ia-dot" aria-hidden="true"></span>
           <div>
@@ -295,20 +387,42 @@
 
       <form id="form-nouveau" class="form" autocomplete="off">
         <input type="hidden" id="edit-client-id" value="" />
-        <label class="field"><span>Nom</span><input name="nom" required placeholder="Dupont" /></label>
-        <label class="field"><span>Prénom</span><input name="prenom" required placeholder="Jean" /></label>
+        <fieldset class="field field--entite">
+          <legend class="field-label">Entité</legend>
+          <div class="toggle-row" role="radiogroup" aria-label="Entité">
+            <label class="toggle">
+              <input type="radio" name="entite" value="particulier" id="entite-particulier" checked />
+              <span>Particulier</span>
+            </label>
+            <label class="toggle">
+              <input type="radio" name="entite" value="pro" id="entite-pro" />
+              <span>Pro</span>
+            </label>
+          </div>
+        </fieldset>
+
+        <div id="bloc-particulier-noms">
+          <label class="field">
+            <span>Nom <em class="opt">(optionnel)</em></span>
+            <input name="nom" id="input-nom" placeholder="Dupont" />
+          </label>
+          <label class="field">
+            <span>Prénom <em class="opt">(optionnel)</em></span>
+            <input name="prenom" id="input-prenom" placeholder="Jean" />
+          </label>
+        </div>
+
+        <div id="bloc-pro-nom" hidden>
+          <label class="field">
+            <span>Nom / raison sociale <em class="opt">(optionnel)</em></span>
+            <input id="input-pro-nom" placeholder="Piscines Martin SARL" autocomplete="organization" />
+          </label>
+        </div>
+
         <label class="field field--suggest">
           <span>Adresse</span>
-          <input name="adresse" id="input-adresse" autocomplete="off" placeholder="Tapez rue + code postal…" />
+          <input name="adresse" id="input-adresse" required autocomplete="off" placeholder="Tapez rue + code postal…" />
           <ul class="suggestions" id="adresse-suggestions" hidden></ul>
-        </label>
-        <label class="field">
-          <span>E-mail <em class="opt">(optionnel)</em></span>
-          <input name="email" id="input-email" type="email" autocomplete="off" placeholder="client@email.fr" />
-        </label>
-        <label class="field">
-          <span>Téléphone <em class="opt">(optionnel)</em></span>
-          <input name="telephone" id="input-telephone" type="tel" autocomplete="off" placeholder="06 12 34 56 78" />
         </label>
 
         <div class="gps-box">
@@ -318,6 +432,17 @@
             <label class="field"><span>Longitude</span><input name="longitude" id="input-lon" inputmode="decimal" placeholder="-0.123036" /></label>
           </div>
           <button type="button" class="btn btn--ghost btn--block" id="btn-gps-actuel">Utiliser ma position GPS</button>
+        </div>
+
+        <div id="bloc-edit-contact" hidden>
+          <label class="field">
+            <span>E-mail <em class="opt">(optionnel)</em></span>
+            <input name="email" id="input-email" type="email" autocomplete="off" placeholder="client@email.fr" />
+          </label>
+          <label class="field">
+            <span>Téléphone <em class="opt">(optionnel)</em></span>
+            <input name="telephone" id="input-telephone" type="tel" autocomplete="off" placeholder="06 12 34 56 78" />
+          </label>
         </div>
 
         <!-- Champs techniques cachés (compat API / agenda) -->
@@ -338,8 +463,8 @@
           <div id="bloc-passage" hidden><p id="passage-preview"></p></div>
         </div>
 
-        <!-- Options : création et modification (hivernage modifiable à tout moment) -->
-        <div id="bloc-edit-options" class="bloc-edit-options">
+        <!-- Options : uniquement en modification -->
+        <div id="bloc-edit-options" class="bloc-edit-options" hidden>
           <p class="field-label">Options du client</p>
           <p class="muted">Appuie sur une option pour ajouter / modifier des lignes et des photos.</p>
           <div class="option-stack" id="option-grid" role="tablist">
@@ -390,6 +515,16 @@
                 <p>E-mail / tél. : <strong id="cred-login">—</strong></p>
                 <p>Mot de passe : <strong id="cred-password">—</strong></p>
               </div>
+            </div>
+
+            <div id="extra-local-technique" class="option-extra" hidden>
+              <p class="field-label">Matériel du catalogue</p>
+              <p class="muted muted--sm">Coche le matériel présent chez le client (Accessoires).</p>
+              <div id="local-tech-accessoires" class="lt-accessoires"></div>
+              <label class="field" style="margin-top:0.75rem">
+                <span>Champ libre</span>
+                <textarea id="input-local-tech-libre" rows="3" placeholder="Autre matériel, remarques…"></textarea>
+              </label>
             </div>
 
             <div id="extra-hivernage" class="option-extra" hidden>

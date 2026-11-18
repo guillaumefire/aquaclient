@@ -23,6 +23,7 @@
     carte: $("#screen-carte"),
     agenda: $("#screen-agenda"),
     factures: $("#screen-factures"),
+    accessoires: $("#screen-accessoires"),
     dashboard: $("#screen-dashboard"),
     visite: $("#screen-visite"),
     nouveau: $("#screen-nouveau"),
@@ -30,11 +31,58 @@
   };
 
   const TYPE_LABELS = {
+    ouverture: "Ouverture",
     depannage: "Dépannage",
     entretien_simple: "Entretien classique",
     entretien_complet: "Entretien complet",
     hivernage: "Hivernage",
+    travaux: "Travaux à prévoir",
+    fourniture: "Fourniture",
+    devis: "Devis",
   };
+
+  function clientLabel(c) {
+    if (!c) return "—";
+    if (c.label) return c.label;
+    const isPro = (c.entite || "particulier") === "pro";
+    if (isPro) {
+      const proName = (c.nom || "").trim();
+      if (proName) return proName;
+    } else {
+      const name = `${c.prenom || ""} ${c.nom || ""}`.trim();
+      if (name) return name;
+    }
+    const entite = isPro ? "Pro" : "Particulier";
+    const adresse = (c.adresse || "").trim();
+    if (adresse) return `${entite} — ${adresse}`;
+    return c.id != null ? `${entite} #${c.id}` : entite;
+  }
+
+  function entiteLabel(c) {
+    return (c?.entite || "particulier") === "pro" ? "Pro" : "Particulier";
+  }
+
+  function currentEntite() {
+    const el = document.querySelector('input[name="entite"]:checked');
+    return el && el.value === "pro" ? "pro" : "particulier";
+  }
+
+  function syncEntiteFields() {
+    const isPro = currentEntite() === "pro";
+    const blocPart = $("#bloc-particulier-noms");
+    const blocPro = $("#bloc-pro-nom");
+    if (blocPart) blocPart.hidden = isPro;
+    if (blocPro) blocPro.hidden = !isPro;
+    const nom = $("#input-nom");
+    const prenom = $("#input-prenom");
+    const proNom = $("#input-pro-nom");
+    if (isPro) {
+      if (proNom && nom && !proNom.value && nom.value) proNom.value = nom.value;
+      if (prenom) prenom.value = "";
+    } else if (nom && proNom && !nom.value && proNom.value) {
+      nom.value = proNom.value;
+    }
+  }
 
   const OPTION_KEYS = ["ouverture", "local_technique", "hivernage", "entretien"];
   const OPTION_LABELS = {
@@ -53,7 +101,7 @@
   };
   const OPTION_HINTS = {
     ouverture: "Ajoute des lignes d’info pour l’ouverture (ex. date, niveau d’eau…).",
-    local_technique: "Ajoute des lignes (ex. Pompe Speedeo, Filtre sable…).",
+    local_technique: "Coche le matériel du catalogue et/ou saisis un champ libre.",
     hivernage: "Choisis actif ou passif, puis complète les étapes + photos / commentaire.",
     entretien: "Ajoute des lignes pour l’entretien de ce client.",
     compte: "Coordonnées et accès client.",
@@ -106,6 +154,11 @@
   let hivernageActifSteps = [];
   /** @type {{id:string,label:string,parent_id?:string|null,selected:boolean,commentaire:string,photos?:Array}[]|null} */
   let hivernagePassifSteps = null;
+  /** Local technique : ids catalogue + texte libre */
+  let localTechniqueMeta = { accessoire_ids: [], libre: "" };
+  /** @type {object[]} */
+  let accessoiresCache = [];
+  let accessoiresCategories = [];
   let activeOption = null;
   /** @type {Record<string, Array>} photos serveur par instruction_id */
   let hivernagePhotosByInst = {};
@@ -318,6 +371,11 @@
         return cur.some((s) => s.selected || (s.commentaire || "").trim());
       }
       return cur.some((s) => (s.label || "").trim() || (s.commentaire || "").trim());
+    }
+    if (key === "local_technique") {
+      if ((localTechniqueMeta.libre || "").trim()) return true;
+      if ((localTechniqueMeta.accessoire_ids || []).length) return true;
+      return (optionsSteps.local_technique || []).some((s) => (s.label || "").trim());
     }
     const steps = optionsSteps[key] || [];
     return steps.some((s) => {
@@ -662,6 +720,97 @@
     if (com) hivernageMeta.commentaire = (com.value || "").trim();
   }
 
+  function syncLocalTechniqueFromUi() {
+    const root = $("#local-tech-accessoires");
+    if (root) {
+      const ids = $$('input[type="checkbox"][data-acc-id]', root)
+        .filter((c) => c.checked)
+        .map((c) => String(c.dataset.accId));
+      localTechniqueMeta.accessoire_ids = ids;
+    }
+    const libre = $("#input-local-tech-libre");
+    if (libre) localTechniqueMeta.libre = (libre.value || "").trim();
+  }
+
+  function renderLocalTechniqueEditor() {
+    const root = $("#local-tech-accessoires");
+    if (!root) return;
+    const selected = new Set(
+      (localTechniqueMeta.accessoire_ids || []).map((x) => String(x))
+    );
+    const items = accessoiresCache || [];
+    root.innerHTML = "";
+    if (!items.length) {
+      root.innerHTML =
+        '<p class="muted muted--sm">Aucun accessoire au catalogue. Ajoute-en via Accueil → Accessoires.</p>';
+      return;
+    }
+    const byCat = new Map();
+    items.forEach((a) => {
+      const cat = a.categorie || "Autre";
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat).push(a);
+    });
+    [...byCat.keys()]
+      .sort((a, b) => a.localeCompare(b, "fr"))
+      .forEach((cat) => {
+        const title = document.createElement("p");
+        title.className = "lt-cat";
+        title.textContent = cat;
+        root.appendChild(title);
+        byCat.get(cat).forEach((a) => {
+          const id = String(a.id);
+          const lab = [a.marque, a.modele].filter(Boolean).join(" · ") || a.label || id;
+          const row = document.createElement("label");
+          row.className = "lt-check";
+          row.innerHTML =
+            `<input type="checkbox" data-acc-id="${escapeHtml(id)}" ${
+              selected.has(id) ? "checked" : ""
+            } />` +
+            `<span>${escapeHtml(lab)}</span>` +
+            (a.has_notice
+              ? `<a class="lt-notice" href="${escapeHtml(
+                  a.notice_url || `/api/accessoires/${id}/notice`
+                )}" target="_blank" rel="noopener">Notice</a>`
+              : "");
+          $("input", row)?.addEventListener("change", () => {
+            syncLocalTechniqueFromUi();
+            refreshOptionButtonLabels();
+          });
+          root.appendChild(row);
+        });
+      });
+    const libre = $("#input-local-tech-libre");
+    if (libre) libre.value = localTechniqueMeta.libre || "";
+  }
+
+  async function ensureAccessoiresLoaded(force = false) {
+    if (!force && accessoiresCache.length) return accessoiresCache;
+    try {
+      const data = await api("/api/accessoires");
+      accessoiresCache = data.accessoires || [];
+      accessoiresCategories = data.categories || [];
+    } catch {
+      if (force) accessoiresCache = [];
+    }
+    return accessoiresCache;
+  }
+
+  function applyLocalTechniqueUi() {
+    const isLt = activeOption === "local_technique";
+    const extra = $("#extra-local-technique");
+    const stepsBloc = $("#bloc-option-steps");
+    const addBloc = $("#bloc-add-option-step");
+    if (extra) {
+      extra.hidden = !isLt;
+      extra.style.display = isLt ? "" : "none";
+    }
+    if (isLt) {
+      if (stepsBloc) stepsBloc.hidden = true;
+      if (addBloc) addBloc.hidden = true;
+    }
+  }
+
   function applyHivernageModeUi() {
     const isHiv = activeOption === "hivernage";
     const extra = $("#extra-hivernage");
@@ -669,12 +818,19 @@
     const comBloc = $("#bloc-hivernage-commentaire");
     const hint = $("#option-panel-hint");
     const modeHint = $("#hivernage-mode-hint");
+    const ltExtra = $("#extra-local-technique");
+    if (ltExtra && activeOption !== "local_technique") {
+      ltExtra.hidden = true;
+      ltExtra.style.display = "none";
+    }
     if (extra) {
       extra.hidden = !isHiv;
       extra.style.display = isHiv ? "" : "none";
     }
     if (!isHiv) {
-      if (addBloc) addBloc.hidden = false;
+      if (activeOption !== "local_technique") {
+        if (addBloc) addBloc.hidden = false;
+      }
       if (comBloc) comBloc.hidden = true;
       return;
     }
@@ -799,9 +955,16 @@
     const typeEl = form.querySelector('input[name="type_entretien"]:checked');
     const freqEl = form.querySelector('input[name="frequence_passage"]:checked');
     const typeEntretien = typeEl ? typeEl.value : "entretien_simple";
+    const entite = currentEntite();
+    const nom =
+      entite === "pro"
+        ? ($("#input-pro-nom")?.value || form.nom.value || "").trim()
+        : form.nom.value.trim();
+    const prenom = entite === "pro" ? "" : form.prenom.value.trim();
     const payload = {
-      nom: form.nom.value.trim(),
-      prenom: form.prenom.value.trim(),
+      nom,
+      prenom,
+      entite,
       adresse: form.adresse.value.trim() || `GPS ${latVal}, ${lonVal}`,
       pompe: form.pompe.value.trim(),
       filtre: form.filtre.value.trim(),
@@ -828,10 +991,21 @@
     payload.checklist_hivernage = (hiv.steps || [])
       .filter((s) => (hiv.mode === "passif" ? s.selected : true) && (s.label || "").trim())
       .map((s) => ({ id: s.id, label: s.label.trim() }));
+    syncLocalTechniqueFromUi();
     const opts = {};
     OPTION_KEYS.forEach((k) => {
       if (k === "hivernage") {
         opts.hivernage = hiv;
+        return;
+      }
+      if (k === "local_technique") {
+        opts.local_technique = {
+          accessoire_ids: [...(localTechniqueMeta.accessoire_ids || [])],
+          libre: (localTechniqueMeta.libre || "").trim(),
+          steps: (optionsSteps.local_technique || [])
+            .map((s) => ({ id: s.id, label: (s.label || "").trim() }))
+            .filter((s) => s.label),
+        };
         return;
       }
       opts[k] = (optionsSteps[k] || [])
@@ -981,13 +1155,23 @@
     $("#edit-client-id").value = "";
     $("#nouveau-eyebrow").textContent = "Enregistrement";
     $("#nouveau-title").textContent = "Nouveau client";
-    $("#btn-submit-nouveau").textContent = "Enregistrer";
+    const btnSubmit = $("#btn-submit-nouveau");
+    if (btnSubmit) {
+      btnSubmit.textContent = "Enregistrer";
+      delete btnSubmit.dataset.goHome;
+      delete btnSubmit.dataset.continueVisit;
+    }
     $("#btn-supprimer-client").hidden = true;
     setFeedback($("#nouveau-feedback"), "", null);
     hideSuggestions();
     gpsOverride = null;
     $("#input-lat").value = "";
     $("#input-lon").value = "";
+    const entitePart = document.querySelector('input[name="entite"][value="particulier"]');
+    if (entitePart) entitePart.checked = true;
+    const proNom = $("#input-pro-nom");
+    if (proNom) proNom.value = "";
+    syncEntiteFields();
     const radio = document.querySelector('input[name="type_entretien"][value="entretien_simple"]');
     if (radio) radio.checked = true;
     document.querySelectorAll('input[name="frequence_passage"]').forEach((r) => {
@@ -1008,6 +1192,7 @@
     hivernageMeta = { mode: "actif", commentaire: "" };
     hivernageActifSteps = [];
     hivernagePassifSteps = null;
+    localTechniqueMeta = { accessoire_ids: [], libre: "" };
     hivernagePhotosByInst = {};
     activeOption = null;
     const chkHiv = $("#chk-piscine-hivernee");
@@ -1019,11 +1204,15 @@
   }
 
   function setEditMode(isEdit) {
-    // Options (dont hivernage) toujours accessibles en création et modification
+    // Contact / options : uniquement en modification (GPS reste toujours avec l’adresse)
+    const contact = $("#bloc-edit-contact");
+    if (contact) contact.hidden = !isEdit;
     const bloc = $("#bloc-edit-options");
-    if (bloc) bloc.hidden = false;
+    if (bloc) bloc.hidden = !isEdit;
     const del = $("#btn-supprimer-client");
     if (del) del.hidden = !isEdit;
+    if (!isEdit) closeOptionPanel({ discard: true });
+    syncEntiteFields();
     refreshOptionButtonLabels();
   }
 
@@ -1045,10 +1234,12 @@
     if (!discard) {
       if (activeOption === "hivernage") {
         stashCurrentHivernageMode();
+      } else if (activeOption === "local_technique") {
+        syncLocalTechniqueFromUi();
       } else {
         syncActiveOptionFromEditor();
       }
-      pruneEmptyOptionSteps(activeOption);
+      if (activeOption !== "local_technique") pruneEmptyOptionSteps(activeOption);
     }
     activeOption = null;
     const panel = $("#option-panel");
@@ -1092,7 +1283,23 @@
         extraHiv.hidden = true;
         extraHiv.style.display = "none";
       }
+      const extraLt = $("#extra-local-technique");
+      if (extraLt) {
+        extraLt.hidden = true;
+        extraLt.style.display = "none";
+      }
       syncBlocCompte();
+    } else if (key === "local_technique") {
+      const blocCompte = $("#bloc-compte");
+      if (blocCompte) blocCompte.hidden = true;
+      const hint = $("#option-panel-hint");
+      if (hint) hint.textContent = OPTION_HINTS.local_technique;
+      applyHivernageModeUi();
+      applyLocalTechniqueUi();
+      ensureAccessoiresLoaded(true).then(() => {
+        renderLocalTechniqueEditor();
+        refreshOptionButtonLabels();
+      });
     } else {
       const blocCompte = $("#bloc-compte");
       if (blocCompte) blocCompte.hidden = true;
@@ -1103,6 +1310,7 @@
       } else if (!(optionsSteps[key] || []).length) {
         optionsSteps[key] = [{ id: newInstructionId(), label: "", photos: [] }];
       }
+      applyLocalTechniqueUi();
       applyHivernageModeUi();
       renderOptionStepsEditor();
     }
@@ -1208,8 +1416,14 @@
 
   function remplirFormClient(client) {
     const form = $("#form-nouveau");
+    const entite = (client.entite || "particulier") === "pro" ? "pro" : "particulier";
+    const entiteRadio = document.querySelector(`input[name="entite"][value="${entite}"]`);
+    if (entiteRadio) entiteRadio.checked = true;
     form.nom.value = client.nom || "";
-    form.prenom.value = client.prenom || "";
+    form.prenom.value = entite === "pro" ? "" : client.prenom || "";
+    const proNom = $("#input-pro-nom");
+    if (proNom) proNom.value = entite === "pro" ? client.nom || "" : "";
+    syncEntiteFields();
     form.adresse.value = client.adresse || "";
     form.pompe.value = client.pompe || "";
     form.filtre.value = client.filtre || "";
@@ -1243,8 +1457,41 @@
       mode: hivCfg.mode === "passif" ? "passif" : "actif",
       commentaire: String(hivCfg.commentaire || "").trim(),
     };
+    const ltCfg =
+      client.local_technique_config ||
+      (opts.local_technique && !Array.isArray(opts.local_technique)
+        ? opts.local_technique
+        : null) ||
+      {};
+    localTechniqueMeta = {
+      accessoire_ids: (ltCfg.accessoire_ids || []).map((x) => String(x)),
+      libre: String(ltCfg.libre || "").trim(),
+    };
     OPTION_KEYS.forEach((k) => {
       if (k === "hivernage") return;
+      if (k === "local_technique") {
+        const stepsRaw = Array.isArray(ltCfg.steps)
+          ? ltCfg.steps
+          : Array.isArray(opts.local_technique)
+            ? opts.local_technique
+            : [];
+        optionsSteps.local_technique = stepsRaw
+          .map((item) => {
+            if (item && typeof item === "object") {
+              const label = String(item.label || item.texte || "").trim();
+              if (!label) return null;
+              return {
+                id: String(item.id || "").trim() || newInstructionId(),
+                label,
+                photos: [],
+              };
+            }
+            const label = String(item || "").trim();
+            return label ? { id: newInstructionId(), label, photos: [] } : null;
+          })
+          .filter(Boolean);
+        return;
+      }
       const raw = opts[k];
       if (Array.isArray(raw)) {
         optionsSteps[k] = raw
@@ -1402,6 +1649,10 @@
     show("nouveau");
   }
 
+  $$('input[name="entite"]').forEach((el) => {
+    el.addEventListener("change", () => syncEntiteFields());
+  });
+
   $("#btn-nouveau").addEventListener("click", () => {
     resetNouveau();
     show("nouveau");
@@ -1422,8 +1673,13 @@
   function proposerClient(client, distanceM, { horsRayon = false } = {}) {
     clientActif = client;
     $("#confirm-eyebrow").textContent = horsRayon ? "Client le plus proche" : "Client à proximité";
-    $("#confirm-name").textContent = `${client.prenom} ${client.nom}`;
-    $("#confirm-adresse").textContent = client.adresse;
+    $("#confirm-name").textContent = clientLabel(client);
+    $("#confirm-adresse").textContent = [
+      entiteLabel(client),
+      client.adresse || "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
     $("#confirm-distance").textContent = `À environ ${formatDistance(distanceM)}`;
     const hint = $("#confirm-hint");
     hint.hidden = !horsRayon;
@@ -1433,10 +1689,227 @@
     show("confirm");
   }
 
-  function typeEntretienClient(client) {
-    return client?.type_entretien === "entretien_complet"
-      ? "entretien_complet"
-      : "entretien_simple";
+  let typeMenuLevel = "root";
+
+  function showTypeMenuLevel(level) {
+    typeMenuLevel = level || "root";
+    const panels = {
+      root: $("#type-menu-root"),
+      entretien: $("#type-menu-entretien"),
+      divers: $("#type-menu-divers"),
+    };
+    Object.entries(panels).forEach(([key, el]) => {
+      if (!el) return;
+      const on = key === typeMenuLevel;
+      el.hidden = !on;
+      el.style.display = on ? "" : "none";
+    });
+    const meta = $("#type-client-meta");
+    if (meta) {
+      if (typeMenuLevel === "entretien") meta.textContent = "Entretien — choisissez le type";
+      else if (typeMenuLevel === "divers") meta.textContent = "Divers — choisissez l’action";
+      else meta.textContent = "Que souhaitez-vous faire ?";
+    }
+  }
+
+  function isDepannageVisite(visite) {
+    const t = visite?.type || "";
+    return t === "depannage" || t === "travaux";
+  }
+
+  const TRAVAUX_PREFIX = "Travaux à prévoir : ";
+  let depSpeechRec = null;
+
+  function syncDepannageControls(visite) {
+    const running = !!(visite?.debut && !visite?.fin);
+    [
+      "#dep-travaux-texte",
+      "#btn-dep-travaux-parler",
+      "#btn-dep-travaux-ajouter",
+      "#dep-fourniture-texte",
+      "#btn-dep-fourniture-parler",
+      "#btn-dep-fourniture-ajouter",
+    ].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.disabled = !running;
+    });
+  }
+
+  function applyDepannageVisiteUi(visite) {
+    const isDep = isDepannageVisite(visite);
+    const bloc = $("#bloc-depannage-visite");
+    const checklist = $("#checklist");
+    const title = $("#visite-checkup-title");
+    const ia = $("#visite-ia-panel");
+    const lists = $(".lists");
+    if (bloc) {
+      bloc.hidden = !isDep;
+      bloc.style.display = isDep ? "" : "none";
+    }
+    if (checklist) {
+      checklist.hidden = isDep;
+      checklist.style.display = isDep ? "none" : "";
+    }
+    if (title) {
+      title.hidden = isDep;
+      title.textContent = isDep ? "Dépannage" : "Check-up";
+    }
+    if (ia) {
+      ia.hidden = isDep;
+      ia.style.display = isDep ? "none" : "";
+    }
+    if (lists) {
+      lists.hidden = isDep;
+      lists.style.display = isDep ? "none" : "";
+    }
+    syncDepannageControls(visite);
+  }
+
+  function renderDepTravaux(notes) {
+    const ul = $("#liste-dep-travaux");
+    if (!ul) return;
+    const items = (notes || []).filter((n) =>
+      String(n.texte || "").startsWith(TRAVAUX_PREFIX)
+    );
+    if (!items.length) {
+      ul.innerHTML = '<li class="muted">Aucun travail noté.</li>';
+      return;
+    }
+    ul.innerHTML = items
+      .map(
+        (n) =>
+          `<li><strong>${escapeHtml(
+            String(n.texte || "").slice(TRAVAUX_PREFIX.length)
+          )}</strong><span class="meta">${escapeHtml(
+            formatDateFr(n.date)
+          )}</span></li>`
+      )
+      .join("");
+  }
+
+  function renderDepFournitures(fournitures) {
+    const ul = $("#liste-dep-fournitures");
+    if (!ul) return;
+    const items = fournitures || [];
+    if (!items.length) {
+      ul.innerHTML = '<li class="muted">Aucune fourniture.</li>';
+      return;
+    }
+    ul.innerHTML = items
+      .map(
+        (f) =>
+          `<li><strong>${escapeHtml(String(f.quantite))} × ${escapeHtml(
+            f.description || ""
+          )}</strong><span class="meta">${escapeHtml(
+            formatDateFr(f.date)
+          )}</span></li>`
+      )
+      .join("");
+  }
+
+  async function refreshDepannageLists() {
+    if (!clientActif?.id || !isDepannageVisite(visiteActive)) return;
+    try {
+      const fiche = await api(`/api/clients/${clientActif.id}`);
+      renderDepTravaux(fiche.notes || []);
+      const fours = (fiche.fournitures || []).filter((f) => {
+        if (!visiteActive?.id) return true;
+        return String(f.visite_id || "") === String(visiteActive.id);
+      });
+      // Affiche d’abord les fournitures du bon, sinon l’historique récent
+      renderDepFournitures(fours.length ? fours : (fiche.fournitures || []).slice(-8));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function stopDepSpeech() {
+    try {
+      depSpeechRec?.stop?.();
+    } catch {
+      /* ignore */
+    }
+    depSpeechRec = null;
+  }
+
+  function speakIntoTextarea(textarea, btn) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setFeedback($("#dep-feedback"), "Dictée non disponible sur ce navigateur.", false);
+      return;
+    }
+    if (!textarea) return;
+    stopDepSpeech();
+    releaseSharedMic?.();
+    const rec = new SR();
+    depSpeechRec = rec;
+    rec.lang = "fr-FR";
+    rec.continuous = false;
+    rec.interimResults = true;
+    let finalText = "";
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Écoute…";
+    }
+    setFeedback($("#dep-feedback"), "Parlez maintenant…", null);
+    rec.onresult = (ev) => {
+      let interim = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const t = ev.results[i][0].transcript || "";
+        if (ev.results[i].isFinal) finalText += `${t} `;
+        else interim += t;
+      }
+      const base = (textarea.dataset.base || textarea.value || "").trim();
+      const spoken = `${finalText} ${interim}`.trim();
+      textarea.value = [base, spoken].filter(Boolean).join(" ").trim();
+    };
+    rec.onerror = () => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Parler";
+      }
+      setFeedback($("#dep-feedback"), "Dictée interrompue.", false);
+      depSpeechRec = null;
+    };
+    rec.onend = () => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Parler";
+      }
+      delete textarea.dataset.base;
+      const spoken = (textarea.value || "").trim();
+      setFeedback(
+        $("#dep-feedback"),
+        spoken ? "Texte ajouté — vous pouvez corriger puis Ajouter." : "Rien entendu.",
+        !!spoken
+      );
+      depSpeechRec = null;
+    };
+    textarea.dataset.base = (textarea.value || "").trim();
+    try {
+      rec.start();
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Parler";
+      }
+      setFeedback($("#dep-feedback"), err.message || "Micro indisponible.", false);
+    }
+  }
+
+  function showTypeMenu(client) {
+    if (!client) return;
+    clientActif = client;
+    $("#type-client-name").textContent = clientLabel(client);
+    const metaBits = [entiteLabel(client), client.adresse || ""].filter(Boolean);
+    const meta = $("#type-client-meta");
+    if (meta) meta.textContent = metaBits.join(" · ") || "Que souhaitez-vous faire ?";
+    const btnOuv = $("#btn-action-ouverture");
+    const btnHiv = $("#btn-action-hivernage");
+    if (btnOuv) btnOuv.hidden = false;
+    if (btnHiv) btnHiv.hidden = false;
+    showTypeMenuLevel("root");
+    show("type");
   }
 
   async function ouvrirVisite(client, typeVisite) {
@@ -1445,30 +1918,85 @@
     show("loading");
     $("#loading-text").textContent = "Ouverture de la visite…";
     try {
-      const visite = await api("/api/visites", {
+      let visite = await api("/api/visites", {
         method: "POST",
         body: JSON.stringify({ client_id: client.id, type: typeVisite }),
       });
+      // Dépannage : Début manuel. Autres types : démarre le bon tout de suite.
+      if (!visite.debut && !isDepannageVisite({ type: typeVisite })) {
+        try {
+          visite = await api(`/api/visites/${visite.id}/debut`, {
+            method: "POST",
+            body: "{}",
+          });
+          if (!visite.client) visite.client = client;
+        } catch {
+          /* la visite reste ouverte, Début manuel possible */
+        }
+      }
+      if (!visite.client) visite.client = client;
       visiteActive = visite;
       await afficherVisite(visite);
       show("visite");
     } catch (err) {
-      show("home");
+      showTypeMenu(client);
       setFeedback($("#geo-status"), err.message, false);
       alert(err.message || "Impossible d'ouvrir la visite. Rechargez la page (Ctrl+F5).");
     }
   }
 
   function allerChezClient(client) {
-    return ouvrirVisite(client, typeEntretienClient(client));
+    return showTypeMenu(client);
   }
 
   $("#btn-valider").addEventListener("click", () => {
     if (!clientActif) return;
-    allerChezClient(clientActif);
+    showTypeMenu(clientActif);
   });
 
-  $("#btn-back-type").addEventListener("click", () => show("confirm"));
+  $("#btn-back-type").addEventListener("click", () => {
+    if (typeMenuLevel !== "root") {
+      showTypeMenuLevel("root");
+      if (clientActif) {
+        const meta = $("#type-client-meta");
+        if (meta) {
+          meta.textContent = [entiteLabel(clientActif), clientActif.adresse || ""]
+            .filter(Boolean)
+            .join(" · ") || "Que souhaitez-vous faire ?";
+        }
+      }
+      return;
+    }
+    if (clientActif) show("confirm");
+    else show("home");
+  });
+
+  $("#btn-back-visite")?.addEventListener("click", () => {
+    if (clientActif) showTypeMenu(clientActif);
+    else show("home");
+  });
+
+  $$("[data-action]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!clientActif) return;
+      const action = btn.dataset.action;
+      if (action === "ouverture") {
+        ouvrirVisite(clientActif, "ouverture");
+        return;
+      }
+      if (action === "hivernage") {
+        ouvrirVisite(clientActif, "hivernage");
+        return;
+      }
+      if (action === "depannage") {
+        ouvrirVisite(clientActif, "depannage");
+        return;
+      }
+      if (action === "entretien" || action === "divers") {
+        showTypeMenuLevel(action);
+      }
+    });
+  });
 
   $$("[data-visite]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1479,23 +2007,11 @@
 
   $("#btn-depannage-visite")?.addEventListener("click", async () => {
     if (!clientActif) return;
-    if (visiteActive?.type === "depannage") {
-      setFeedback($("#check-feedback"), "Visite déjà en mode dépannage.", true);
-      return;
-    }
-    const ok = window.confirm("Passer en visite dépannage pour ce client ?");
-    if (!ok) return;
     await ouvrirVisite(clientActif, "depannage");
   });
 
   $("#btn-hivernage-visite")?.addEventListener("click", async () => {
     if (!clientActif) return;
-    if (visiteActive?.type === "hivernage") {
-      setFeedback($("#check-feedback"), "Visite déjà en mode hivernage.", true);
-      return;
-    }
-    const ok = window.confirm("Passer en visite hivernage pour ce client ?");
-    if (!ok) return;
     await ouvrirVisite(clientActif, "hivernage");
   });
 
@@ -1608,7 +2124,7 @@
         const c = data.plus_proche || data.client;
         plusProcheHorsRayon = { client: c, distance_m: data.distance_m };
         $("#none-detail").textContent =
-          `Personne dans 1 km. Plus proche : ${c.prenom} ${c.nom} à ${formatDistance(data.distance_m)}.`;
+          `Personne dans 1 km. Plus proche : ${clientLabel(c)} à ${formatDistance(data.distance_m)}.`;
         $("#btn-utiliser-proche").hidden = false;
         show("none");
         return;
@@ -1656,7 +2172,7 @@
 
   function matchClientSearch(c, q) {
     if (!q) return true;
-    const hay = `${c.prenom || ""} ${c.nom || ""} ${c.adresse || ""} ${c.email || ""} ${c.telephone || ""}`
+    const hay = `${c.prenom || ""} ${c.nom || ""} ${c.entite || ""} ${c.adresse || ""} ${c.email || ""} ${c.telephone || ""} ${clientLabel(c)}`
       .toLowerCase()
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "");
@@ -1686,17 +2202,15 @@
     filtered.forEach((c) => {
       const li = document.createElement("li");
       li.className = "pick-item pick-item--row";
-      const typeLabel =
-        c.type_entretien === "entretien_complet" ? "Complet" : "Classique";
       li.innerHTML = `
           <label class="pick-check">
             <input type="checkbox" data-select-client value="${escapeHtml(String(c.id))}" />
             <span class="visually-hidden">Sélectionner</span>
           </label>
           <button type="button" class="pick-main">
-            <strong>${escapeHtml(c.prenom)} ${escapeHtml(c.nom)}</strong>
-            <span class="meta">${escapeHtml(c.adresse)}</span>
-            <span class="meta">${typeLabel}</span>
+            <strong>${escapeHtml(clientLabel(c))}</strong>
+            <span class="meta">${escapeHtml(c.adresse || "")}</span>
+            <span class="meta">${escapeHtml(entiteLabel(c))}</span>
           </button>
           <button type="button" class="btn btn--ghost pick-edit" aria-label="Modifier">✎</button>
         `;
@@ -1968,12 +2482,10 @@
         const lat = Number(c.latitude);
         const lon = Number(c.longitude);
         bounds.push([lat, lon]);
-        const typeLabel =
-          c.type_entretien === "entretien_complet" ? "Complet" : "Classique";
         const marker = L.marker([lat, lon]).bindPopup(
-          `<strong>${escapeHtml(c.prenom)} ${escapeHtml(c.nom)}</strong><br>` +
-            `${escapeHtml(c.adresse)}<br>` +
-            `<em>${typeLabel}</em><br>` +
+          `<strong>${escapeHtml(clientLabel(c))}</strong><br>` +
+            `${escapeHtml(c.adresse || "")}<br>` +
+            `<em>${escapeHtml(entiteLabel(c))}</em><br>` +
             `<button type="button" class="carte-go" data-client-id="${c.id}">Ouvrir</button>`
         );
         marker.on("popupopen", () => {
@@ -2058,8 +2570,8 @@
         const freq = labelFrequence(p.frequence);
         li.innerHTML = `
           <button type="button" class="pick-main agenda-main">
-            <strong>${escapeHtml(p.client.prenom)} ${escapeHtml(p.client.nom)}</strong>
-            <span class="meta">${escapeHtml(p.client.adresse)}</span>
+            <strong>${escapeHtml(clientLabel(p.client))}</strong>
+            <span class="meta">${escapeHtml(p.client.adresse || "")}</span>
             <span class="meta">${escapeHtml(freq)}</span>
           </button>
           <button type="button" class="agenda-status-btn" aria-pressed="${done}">
@@ -2470,6 +2982,187 @@
     btn.addEventListener("click", () => afficherFactures(btn.dataset.filtre));
   });
 
+  const ACCESSOIRE_FALLBACK_CATS = [
+    "Pompe",
+    "Filtre",
+    "Robot",
+    "Skimmer",
+    "Électrolyseur",
+    "Pompe à chaleur",
+    "Traitement",
+    "Autre",
+  ];
+
+  function fillAccessoireCategories(list) {
+    const dl = $("#liste-categories-acc");
+    if (!dl) return;
+    const cats = [...new Set([...(list || []), ...ACCESSOIRE_FALLBACK_CATS])];
+    dl.innerHTML = cats
+      .map((c) => `<option value="${escapeHtml(c)}"></option>`)
+      .join("");
+  }
+
+  function resetAccessoireForm() {
+    $("#acc-edit-id").value = "";
+    $("#acc-categorie").value = "";
+    $("#acc-marque").value = "";
+    $("#acc-modele").value = "";
+    $("#acc-notice").value = "";
+    $("#btn-save-accessoire").textContent = "Ajouter";
+    $("#btn-reset-accessoire").hidden = true;
+    setFeedback($("#accessoires-feedback"), "", null);
+  }
+
+  async function afficherAccessoires() {
+    show("accessoires");
+    const status = $("#accessoires-status");
+    const ul = $("#liste-accessoires");
+    status.textContent = "Chargement…";
+    ul.innerHTML = "";
+    try {
+      const q = ($("#input-acc-search")?.value || "").trim();
+      const params = new URLSearchParams();
+      if (q) params.set("q", q);
+      const data = await api(`/api/accessoires?${params.toString()}`);
+      accessoiresCache = data.accessoires || [];
+      accessoiresCategories = data.categories || ACCESSOIRE_FALLBACK_CATS;
+      fillAccessoireCategories(accessoiresCategories);
+      if (!accessoiresCache.length) {
+        status.textContent = "Aucun accessoire — ajoute le premier ci-dessus.";
+        ul.innerHTML = '<li class="empty">—</li>';
+        return;
+      }
+      status.textContent = `${accessoiresCache.length} accessoire${
+        accessoiresCache.length > 1 ? "s" : ""
+      }`;
+      let lastCat = null;
+      accessoiresCache.forEach((a) => {
+        const cat = a.categorie || "Autre";
+        if (cat !== lastCat) {
+          lastCat = cat;
+          const head = document.createElement("li");
+          head.className = "agenda-day";
+          head.textContent = cat;
+          ul.appendChild(head);
+        }
+        const li = document.createElement("li");
+        li.className = "facture-item acc-item";
+        const title = [a.marque, a.modele].filter(Boolean).join(" · ") || a.label;
+        li.innerHTML = `
+          <div class="facture-main">
+            <strong>${escapeHtml(title)}</strong>
+            <span class="meta">${escapeHtml(a.has_notice ? a.notice_name || "Notice jointe" : "Sans notice")}</span>
+          </div>
+          <div class="facture-flags">
+            ${
+              a.has_notice
+                ? `<a class="flag-btn" href="${escapeHtml(
+                    a.notice_url || `/api/accessoires/${a.id}/notice`
+                  )}" target="_blank" rel="noopener">Notice</a>`
+                : ""
+            }
+            <button type="button" class="flag-btn" data-acc-edit="${escapeHtml(String(a.id))}">Modifier</button>
+            <button type="button" class="flag-btn" data-acc-del="${escapeHtml(String(a.id))}">Supprimer</button>
+          </div>
+        `;
+        ul.appendChild(li);
+      });
+      $$("[data-acc-edit]", ul).forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const a = accessoiresCache.find((x) => String(x.id) === btn.dataset.accEdit);
+          if (!a) return;
+          $("#acc-edit-id").value = String(a.id);
+          $("#acc-categorie").value = a.categorie || "";
+          $("#acc-marque").value = a.marque || "";
+          $("#acc-modele").value = a.modele || "";
+          $("#acc-notice").value = "";
+          $("#btn-save-accessoire").textContent = "Enregistrer";
+          $("#btn-reset-accessoire").hidden = false;
+          setFeedback($("#accessoires-feedback"), "Modification en cours…", null);
+        });
+      });
+      $$("[data-acc-del]", ul).forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!window.confirm("Supprimer cet accessoire ?")) return;
+          try {
+            await api(`/api/accessoires/${btn.dataset.accDel}`, { method: "DELETE" });
+            await afficherAccessoires();
+          } catch (err) {
+            alert(err.message || "Suppression impossible.");
+          }
+        });
+      });
+    } catch (err) {
+      status.textContent = err.message || "Impossible de charger les accessoires.";
+    }
+  }
+
+  $("#btn-accessoires")?.addEventListener("click", () => {
+    resetAccessoireForm();
+    afficherAccessoires();
+  });
+  let accSearchTimer = null;
+  $("#input-acc-search")?.addEventListener("input", () => {
+    clearTimeout(accSearchTimer);
+    accSearchTimer = setTimeout(() => afficherAccessoires(), 220);
+  });
+  $("#btn-reset-accessoire")?.addEventListener("click", () => resetAccessoireForm());
+  $("#form-accessoire")?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const categorie = ($("#acc-categorie")?.value || "").trim();
+    const marque = ($("#acc-marque")?.value || "").trim();
+    const modele = ($("#acc-modele")?.value || "").trim();
+    if (!categorie || !marque) {
+      setFeedback($("#accessoires-feedback"), "Catégorie et marque obligatoires.", false);
+      return;
+    }
+    const editId = ($("#acc-edit-id")?.value || "").trim();
+    const btn = $("#btn-save-accessoire");
+    btn.disabled = true;
+    try {
+      let row;
+      if (editId) {
+        row = await api(`/api/accessoires/${editId}`, {
+          method: "PUT",
+          body: JSON.stringify({ categorie, marque, modele }),
+        });
+      } else {
+        row = await api("/api/accessoires", {
+          method: "POST",
+          body: JSON.stringify({ categorie, marque, modele }),
+        });
+      }
+      const file = $("#acc-notice")?.files?.[0];
+      if (file && row?.id != null) {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch(`/api/accessoires/${row.id}/notice`, {
+          method: "POST",
+          body: fd,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || `Upload notice ${res.status}`);
+        }
+      }
+      resetAccessoireForm();
+      setFeedback(
+        $("#accessoires-feedback"),
+        editId ? "Accessoire mis à jour." : "Accessoire ajouté.",
+        true
+      );
+      await afficherAccessoires();
+    } catch (err) {
+      setFeedback($("#accessoires-feedback"), err.message || "Enregistrement impossible.", false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $("#input-local-tech-libre")?.addEventListener("input", () => {
+    localTechniqueMeta.libre = ($("#input-local-tech-libre")?.value || "").trim();
+    refreshOptionButtonLabels();
+  });
+
   document.querySelectorAll('input[name="type_entretien"]').forEach((el) => {
     el.addEventListener("change", syncBlocPassage);
   });
@@ -2620,6 +3313,27 @@
     const box = $("#visite-equip");
     box.innerHTML = "";
     const tags = [];
+    const lt =
+      client.local_technique_config ||
+      (client.options_checklists && !Array.isArray(client.options_checklists.local_technique)
+        ? client.options_checklists.local_technique
+        : null);
+    if (lt && Array.isArray(lt.accessoire_ids) && lt.accessoire_ids.length) {
+      const byId = Object.fromEntries(
+        (accessoiresCache || []).map((a) => [String(a.id), a])
+      );
+      lt.accessoire_ids.forEach((id) => {
+        const a = byId[String(id)];
+        if (a) {
+          tags.push(
+            [a.categorie, a.marque, a.modele].filter(Boolean).join(" · ") || a.label
+          );
+        } else {
+          tags.push(`Accessoire #${id}`);
+        }
+      });
+    }
+    if (lt && (lt.libre || "").trim()) tags.push(lt.libre.trim());
     if (client.pompe) tags.push(`Pompe : ${client.pompe}`);
     if (client.filtre) tags.push(`Filtre : ${client.filtre}`);
     if (client.robot) tags.push(`Robot : ${client.robot}`);
@@ -2667,19 +3381,23 @@
     const hint = $("#fin-hint");
     if (!btn) return;
     const isHiv = isHivernageVisite(visite);
+    const isDep = isDepannageVisite(visite);
     const ok = checklistComplete(visite?.checklist || []);
     const running = !!(visite?.debut && !visite?.fin);
     const paused = hivernagePausable(visite);
     const done = !!(visite?.debut && visite?.fin && (!isHiv || ok));
 
-    // Hivernage : on peut terminer même sans tout cocher (pause)
-    btn.disabled = !running || (!isHiv && !ok);
-    btn.textContent = isHiv && !ok ? "Terminer (pause)" : "Terminer";
+    // Hivernage : pause possible. Dépannage : Fin dès que démarré (pas de checklist).
+    btn.disabled = !running || (!isHiv && !isDep && !ok);
+    if (isDep) btn.textContent = "Fin";
+    else btn.textContent = isHiv && !ok ? "Terminer (pause)" : "Terminer";
 
     if (btnDebut) {
       btnDebut.disabled = running || done;
       btnDebut.textContent = paused ? "Reprendre" : "Début";
     }
+
+    syncDepannageControls(visite);
 
     if (hint) {
       if (done) {
@@ -2693,7 +3411,12 @@
         )}. Appuyez sur Reprendre.`;
         hint.hidden = false;
       } else if (!visite?.debut) {
-        hint.textContent = "Appuyez sur Début pour démarrer la prestation.";
+        hint.textContent = isDep
+          ? "Appuyez sur Début, puis notez les travaux et fournitures."
+          : "Appuyez sur Début pour démarrer la prestation.";
+        hint.hidden = false;
+      } else if (isDep) {
+        hint.textContent = "Ajoutez travaux / fournitures, puis Fin.";
         hint.hidden = false;
       } else if (isHiv && !ok) {
         hint.textContent =
@@ -2878,23 +3601,46 @@
     const c = visite.client || clientActif;
     clientActif = c;
     $("#visite-type-label").textContent = TYPE_LABELS[visite.type] || visite.type;
-    $("#visite-name").textContent = `${c.prenom} ${c.nom}`;
-    $("#visite-adresse").textContent = c.adresse;
+    $("#visite-name").textContent = clientLabel(c);
+    $("#visite-adresse").textContent = [entiteLabel(c), c.adresse || ""]
+      .filter(Boolean)
+      .join(" · ");
     const btnDep = $("#btn-depannage-visite");
-    if (btnDep) btnDep.hidden = visite.type === "depannage";
+    if (btnDep) btnDep.hidden = true;
     const btnHiv = $("#btn-hivernage-visite");
-    if (btnHiv) btnHiv.hidden = visite.type === "hivernage";
+    if (btnHiv) btnHiv.hidden = true;
+    await ensureAccessoiresLoaded().catch(() => {});
     renderEquip(c);
     renderChrono(visite);
     renderChecklist(visite.checklist || []);
+    applyDepannageVisiteUi(visite);
     setFeedback($("#ia-feedback"), "", null);
     setFeedback($("#check-feedback"), "", null);
+    setFeedback($("#dep-feedback"), "", null);
     $("#ia-texte").value = "";
+    const depTrav = $("#dep-travaux-texte");
+    const depFour = $("#dep-fourniture-texte");
+    if (depTrav) depTrav.value = "";
+    if (depFour) depFour.value = "";
     setIntent(null);
     // Historique en arrière-plan
     refreshHistorique(c.id).catch(() => {});
+    if (isDepannageVisite(visite)) {
+      refreshDepannageLists().catch(() => {});
+    }
     releaseSharedMic();
+    stopDepSpeech();
     $("#ia-texte").value = "";
+    if (isDepannageVisite(visite)) {
+      setFeedback(
+        $("#dep-feedback"),
+        visite.debut && !visite.fin
+          ? "Prestation en cours — notez travaux et fournitures."
+          : "Appuyez sur Début pour commencer.",
+        true
+      );
+      return;
+    }
     // Écoute permanente des mots-clés dès l’ouverture de la visite
     startWakeListen()
       .then(() => {
@@ -2934,8 +3680,9 @@
     visiteActive.fin = null;
     if (!canResume) visiteActive.duree_minutes = null;
     renderChrono(visiteActive);
+    updateFinButton(visiteActive);
     setFeedback(
-      $("#check-feedback"),
+      isDepannageVisite(visiteActive) ? $("#dep-feedback") : $("#check-feedback"),
       canResume ? "Hivernage repris." : "Prestation démarrée.",
       true
     );
@@ -2948,25 +3695,118 @@
           checklist: visiteActive.checklist,
         };
         renderChrono(visiteActive);
+        updateFinButton(visiteActive);
       })
       .catch((err) => {
         visiteActive.debut = prevDebut;
         visiteActive.fin = prevFin;
         visiteActive.duree_minutes = prevDuree;
         renderChrono(visiteActive);
-        setFeedback($("#check-feedback"), err.message, false);
+        updateFinButton(visiteActive);
+        setFeedback(
+          isDepannageVisite(visiteActive) ? $("#dep-feedback") : $("#check-feedback"),
+          err.message,
+          false
+        );
       })
       .finally(() => {
         if (btn) delete btn.dataset.busy;
       });
   });
 
+  $("#btn-dep-travaux-parler")?.addEventListener("click", () => {
+    speakIntoTextarea($("#dep-travaux-texte"), $("#btn-dep-travaux-parler"));
+  });
+  $("#btn-dep-fourniture-parler")?.addEventListener("click", () => {
+    speakIntoTextarea($("#dep-fourniture-texte"), $("#btn-dep-fourniture-parler"));
+  });
+
+  $("#btn-dep-travaux-ajouter")?.addEventListener("click", async () => {
+    if (!clientActif || !isDepannageVisite(visiteActive)) return;
+    if (!visiteActive?.debut || visiteActive?.fin) {
+      setFeedback($("#dep-feedback"), "Appuyez d’abord sur Début.", false);
+      return;
+    }
+    const raw = ($("#dep-travaux-texte")?.value || "").trim();
+    if (!raw) {
+      setFeedback($("#dep-feedback"), "Saisissez ou dictez les travaux.", false);
+      return;
+    }
+    const btn = $("#btn-dep-travaux-ajouter");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await api("/api/ia", {
+        method: "POST",
+        body: JSON.stringify({
+          client_id: clientActif.id,
+          texte: `${TRAVAUX_PREFIX}${raw}`,
+          intent_force: "note",
+          visite_id: visiteActive.id,
+        }),
+      });
+      if (!res.success) {
+        setFeedback($("#dep-feedback"), res.message || "Enregistrement impossible.", false);
+        return;
+      }
+      $("#dep-travaux-texte").value = "";
+      setFeedback($("#dep-feedback"), "Travaux ajoutés.", true);
+      await refreshDepannageLists();
+    } catch (err) {
+      setFeedback($("#dep-feedback"), err.message || "Erreur.", false);
+    } finally {
+      syncDepannageControls(visiteActive);
+    }
+  });
+
+  $("#btn-dep-fourniture-ajouter")?.addEventListener("click", async () => {
+    if (!clientActif || !isDepannageVisite(visiteActive)) return;
+    if (!visiteActive?.debut || visiteActive?.fin) {
+      setFeedback($("#dep-feedback"), "Appuyez d’abord sur Début.", false);
+      return;
+    }
+    const raw = ($("#dep-fourniture-texte")?.value || "").trim();
+    if (!raw) {
+      setFeedback($("#dep-feedback"), "Saisissez ou dictez la fourniture.", false);
+      return;
+    }
+    const btn = $("#btn-dep-fourniture-ajouter");
+    if (btn) btn.disabled = true;
+    try {
+      const res = await api("/api/ia", {
+        method: "POST",
+        body: JSON.stringify({
+          client_id: clientActif.id,
+          texte: raw,
+          intent_force: "fourniture",
+          visite_id: visiteActive.id,
+        }),
+      });
+      if (!res.success) {
+        setFeedback($("#dep-feedback"), res.message || "Enregistrement impossible.", false);
+        return;
+      }
+      $("#dep-fourniture-texte").value = "";
+      const f = res.fourniture;
+      setFeedback(
+        $("#dep-feedback"),
+        f ? `Fourniture : ${f.quantite} × ${f.description}` : "Fourniture ajoutée.",
+        true
+      );
+      await refreshDepannageLists();
+    } catch (err) {
+      setFeedback($("#dep-feedback"), err.message || "Erreur.", false);
+    } finally {
+      syncDepannageControls(visiteActive);
+    }
+  });
+
   $("#btn-fin").addEventListener("click", () => {
     if (!visiteActive) return;
     if (!visiteActive.debut || visiteActive.fin) return;
     const isHiv = isHivernageVisite(visiteActive);
+    const isDep = isDepannageVisite(visiteActive);
     const ok = checklistComplete(visiteActive.checklist || []);
-    if (!isHiv && !ok) {
+    if (!isHiv && !isDep && !ok) {
       setFeedback(
         $("#check-feedback"),
         "Impossible de terminer : cochez toutes les étapes obligatoires.",
@@ -2982,8 +3822,9 @@
     const prevDuree = visiteActive.duree_minutes;
     visiteActive.fin = nowLocalStamp();
     renderChrono(visiteActive);
+    updateFinButton(visiteActive);
     setFeedback(
-      $("#check-feedback"),
+      isDep ? $("#dep-feedback") : $("#check-feedback"),
       isHiv && !ok ? "Hivernage mis en pause…" : "Prestation terminée.",
       true
     );
@@ -2995,6 +3836,7 @@
           client: visiteActive.client,
           checklist: visiteActive.checklist,
         };
+        updateFinButton(visiteActive);
         if (visiteActive.client) {
           if (res.hivernage_complete) {
             visiteActive.client.piscine_hivernee = true;
@@ -4219,15 +5061,41 @@
     hideSuggestions();
     const form = e.target;
     const btn = $("#btn-submit-nouveau");
-    if (btn?.dataset.continueVisit === "1" && clientActif) {
-      delete btn.dataset.continueVisit;
-      allerChezClient(clientActif);
+    if (btn?.dataset.goHome === "1") {
+      delete btn.dataset.goHome;
+      resetNouveau();
+      show("home");
       return;
     }
     const editId = $("#edit-client-id").value.trim();
     const typeEl = form.querySelector('input[name="type_entretien"]:checked');
     const typeEntretien = typeEl ? typeEl.value : "entretien_simple";
     const payload = buildClientPayloadFromForm();
+    if (!editId) {
+      // Création : fiche minimale uniquement
+      payload.creer_compte = false;
+      payload.email = "";
+      payload.telephone = "";
+      payload.password = "";
+      payload.piscine_hivernee = false;
+      payload.checklist_hivernage = [];
+      payload.options_checklists = {
+        ouverture: [],
+        local_technique: { accessoire_ids: [], libre: "", steps: [] },
+        hivernage: {
+          mode: "actif",
+          commentaire: "",
+          steps: [],
+          actif_steps: [],
+          passif_steps: [],
+        },
+        entretien: [],
+      };
+    }
+    if (!(payload.adresse || "").trim()) {
+      setFeedback($("#nouveau-feedback"), "L’adresse est obligatoire.", false);
+      return;
+    }
     if (
       typeEntretien === "entretien_complet" &&
       payload.frequence_passage &&
@@ -4272,49 +5140,32 @@
         document.documentElement.dataset.storage ||
         "";
       const where = storHint === "supabase" ? "Supabase" : "CSV local";
-      setFeedback(
-        $("#nouveau-feedback"),
-        editId ? `Client mis à jour (${where}).` : `Client enregistré sur ${where}.`,
-        true
-      );
       clientActif = client;
       refreshFooter();
       if (!editId) {
-        $("#edit-client-id").value = String(client.id);
         await flushPendingPhotos(client.id);
       }
-      if (editId) {
-        // Recharger depuis le serveur pour confirmer la persistance (mode + étapes)
-        let verified = client;
-        try {
-          verified = await api(`/api/clients/${client.id}`);
-        } catch {
-          verified = client;
-        }
-        clientActif = verified;
-        await loadClientPhotos(verified.id);
-        setEditMode(true);
-        remplirFormClient(verified);
-        afficherCredentials(verified);
-        const mode = verified.hivernage_config?.mode || "actif";
-        setFeedback(
-          $("#nouveau-feedback"),
-          `Client mis à jour (${where}) — hivernage ${mode}.`,
-          true
-        );
-      } else if (client.password_clair) {
-        btn.dataset.continueVisit = "1";
-        btn.textContent = "Continuer la visite";
+      if (client.password_clair) {
+        $("#edit-client-id").value = String(client.id);
+        btn.dataset.goHome = "1";
+        btn.textContent = "Retour à l’accueil";
         $("#nouveau-title").textContent = "Compte créé";
         await loadClientPhotos(client.id);
         setEditMode(true);
         remplirFormClient(client);
         afficherCredentials(client);
+        setFeedback(
+          $("#nouveau-feedback"),
+          `Client enregistré (${where}). Notez les accès puis retournez à l’accueil.`,
+          true
+        );
       } else {
         clearPendingPhotos();
         form.reset();
         gpsOverride = null;
-        allerChezClient(client);
+        resetNouveau();
+        setFeedback($("#geo-status"), `Client enregistré (${where}).`, true);
+        show("home");
       }
     } catch (err) {
       setFeedback($("#nouveau-feedback"), err.message, false);

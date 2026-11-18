@@ -696,6 +696,55 @@ body:has(#screen-home.screen--active) .brand-tag {
   gap: 0.75rem;
 }
 
+.form--compact {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.85rem 0 1.1rem;
+}
+
+.lt-accessoires {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 0.35rem 0;
+}
+
+.lt-cat {
+  margin: 0.55rem 0 0.15rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.lt-check {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+  font-size: 0.95rem;
+}
+
+.lt-check input {
+  width: 1.1rem;
+  height: 1.1rem;
+}
+
+.lt-check span {
+  flex: 1;
+}
+
+.lt-notice {
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: var(--teal-deep);
+  text-decoration: underline;
+}
+
 .facture-main {
   display: grid;
   gap: 0.2rem;
@@ -789,6 +838,57 @@ body:has(#screen-home.screen--active) .brand-tag {
   display: flex;
   flex-direction: column;
   gap: 0.7rem;
+}
+
+.actions[hidden],
+.type-menu[hidden] {
+  display: none !important;
+}
+
+.type-menu {
+  margin-top: 0.35rem;
+}
+
+.depannage-panel {
+  display: grid;
+  gap: 1.1rem;
+  margin: 0.85rem 0 1rem;
+}
+
+.depannage-panel[hidden] {
+  display: none !important;
+}
+
+.dep-zone {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.dep-zone .list {
+  margin: 0;
+}
+
+.dep-zone .list li {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.dep-zone .list li .meta {
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.field--entite {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-inline-size: 0;
+}
+
+.field--entite .field-label {
+  margin-bottom: 0.45rem;
 }
 
 .actions--row {

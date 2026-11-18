@@ -32,13 +32,22 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.11.4"
+APP_VERSION = "1.15.0"
 
 PHOTOS_BUCKET = "photos-clients"
+NOTICES_BUCKET = "notices-accessoires"
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 Mo avant optimisation
+MAX_NOTICE_UPLOAD_BYTES = 12 * 1024 * 1024  # 12 Mo PDF / notice
 MAX_PHOTO_EDGE = 1920
 WEBP_QUALITY = 82
 ALLOWED_PHOTO_MIMES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_NOTICE_MIMES = {
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "application/octet-stream",
+}
 
 DATA_DIR = Path(__file__).parent / "data"
 CLIENTS_CSV = DATA_DIR / "clients.csv"
@@ -49,11 +58,30 @@ VISITES_CSV = DATA_DIR / "visites.csv"
 FACTURES_LEGACY = DATA_DIR / "factures.csv"
 PHOTOS_META_CSV = DATA_DIR / "photos_clients.csv"
 PHOTOS_DIR = DATA_DIR / "photos"
+ACCESSOIRES_CSV = DATA_DIR / "accessoires.csv"
+NOTICES_DIR = DATA_DIR / "notices"
 PASSAGES_STATUT_CSV = DATA_DIR / "passages_statut.csv"
 STATIC_DIR = Path(__file__).parent / "static"
 
 DATA_DIR.mkdir(exist_ok=True)
 PHOTOS_DIR.mkdir(exist_ok=True)
+NOTICES_DIR.mkdir(exist_ok=True)
+
+ACCESSOIRE_FIELDS = [
+    "id", "categorie", "marque", "modele",
+    "notice_path", "notice_name", "notice_mime", "created_at",
+]
+
+ACCESSOIRE_CATEGORIES = [
+    "Pompe",
+    "Filtre",
+    "Robot",
+    "Skimmer",
+    "Électrolyseur",
+    "Pompe à chaleur",
+    "Traitement",
+    "Autre",
+]
 
 PHOTOS_META_FIELDS = [
     "id", "client_id", "instruction_id", "storage_path",
@@ -61,7 +89,7 @@ PHOTOS_META_FIELDS = [
 ]
 
 CLIENT_FIELDS = [
-    "id", "nom", "prenom", "adresse", "latitude", "longitude",
+    "id", "nom", "prenom", "entite", "adresse", "latitude", "longitude",
     "pompe", "filtre", "robot", "skimmer", "vanne_vidange", "injecteurs", "autres",
     "type_entretien", "frequence_passage", "date_debut_passage",
     "identifiant", "email", "telephone", "password_hash", "compte_actif", "auth_uid",
@@ -86,11 +114,16 @@ FOURNITURE_FIELDS = [
 ]
 
 VISITE_TYPE_LABELS = {
+    "ouverture": "Ouverture",
     "depannage": "Dépannage",
     "entretien_simple": "Entretien classique",
     "entretien_complet": "Entretien complet",
     "hivernage": "Hivernage",
+    "travaux": "Travaux à prévoir",
+    "fourniture": "Fourniture",
+    "devis": "Devis",
 }
+VISITE_TYPES = set(VISITE_TYPE_LABELS.keys())
 ANALYSE_FIELDS = ["id", "client_id", "date", "date_ref", "texte"]
 VISITE_FIELDS = [
     "id", "client_id", "date", "type", "checklist_json",
@@ -150,6 +183,7 @@ def read_csv(path: Path) -> list[dict[str, str]]:
             "fournitures": FOURNITURE_FIELDS,
             "analyses": ANALYSE_FIELDS,
             "visites": VISITE_FIELDS,
+            "accessoires": ACCESSOIRE_FIELDS,
         }.get(table))
     if not path.exists():
         return []
@@ -310,6 +344,7 @@ def _migrate_fournitures_visite_id() -> None:
 
 
 _migrate_fournitures_visite_id()
+_ensure_csv(ACCESSOIRES_CSV, ACCESSOIRE_FIELDS)
 
 # Supabase : crée les tables si besoin, puis bascule lecture/écriture
 _csv_read_local = lambda path: (  # noqa: E731
@@ -322,6 +357,7 @@ supabase_db.init_supabase(
         "analyses": (ANALYSES_CSV, ANALYSE_FIELDS, _csv_read_local),
         "fournitures": (FOURNITURES_CSV, FOURNITURE_FIELDS, _csv_read_local),
         "visites": (VISITES_CSV, VISITE_FIELDS, _csv_read_local),
+        "accessoires": (ACCESSOIRES_CSV, ACCESSOIRE_FIELDS, _csv_read_local),
     }
 )
 
@@ -337,8 +373,9 @@ app.add_middleware(
 # ── Modèles ──────────────────────────────────────────────────────────────────
 
 class NouveauClient(BaseModel):
-    nom: str = Field(min_length=1)
-    prenom: str = Field(min_length=1)
+    nom: str = ""
+    prenom: str = ""
+    entite: str = "particulier"  # particulier | pro
     adresse: str = Field(min_length=1)
     latitude: float | None = None
     longitude: float | None = None
@@ -365,8 +402,9 @@ class NouveauClient(BaseModel):
 
 
 class ModifierClient(BaseModel):
-    nom: str = Field(min_length=1)
-    prenom: str = Field(min_length=1)
+    nom: str = ""
+    prenom: str = ""
+    entite: str = "particulier"
     adresse: str = Field(min_length=1)
     latitude: float | None = None
     longitude: float | None = None
@@ -388,6 +426,7 @@ class ModifierClient(BaseModel):
     piscine_hivernee: bool | None = None
     options_checklists: dict[str, Any] | None = None
 
+
 class Position(BaseModel):
     latitude: float
     longitude: float
@@ -400,6 +439,18 @@ class CommandeIA(BaseModel):
     visite_id: int | None = None  # rattache la fourniture au bon d'intervention ouvert
 
 
+class AccessoireCreate(BaseModel):
+    categorie: str = Field(min_length=1)
+    marque: str = Field(min_length=1)
+    modele: str = ""
+
+
+class AccessoireUpdate(BaseModel):
+    categorie: str | None = None
+    marque: str | None = None
+    modele: str | None = None
+
+
 class PositionClient(BaseModel):
     latitude: float
     longitude: float
@@ -407,7 +458,7 @@ class PositionClient(BaseModel):
 
 class VisiteCreate(BaseModel):
     client_id: int
-    type: str  # depannage | entretien_simple | entretien_complet | hivernage
+    type: str  # voir VISITE_TYPES
 
 
 class ChecklistUpdate(BaseModel):
@@ -932,8 +983,50 @@ def empty_options_checklists() -> dict[str, Any]:
     return {k: [] for k in OPTION_CHECKLIST_KEYS}
 
 
+def parse_local_technique_config(raw: Any) -> dict[str, Any]:
+    """Normalise {accessoire_ids, libre, steps} pour le local technique client."""
+    data = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                data = []
+        else:
+            data = []
+    if isinstance(data, list):
+        return {
+            "accessoire_ids": [],
+            "libre": "",
+            "steps": parse_checklist_hivernage(data),
+        }
+    if isinstance(data, dict):
+        ids: list[str] = []
+        for x in data.get("accessoire_ids") or []:
+            s = str(x).strip()
+            if s:
+                ids.append(s)
+        # dédoublonne en gardant l’ordre
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for i in ids:
+            if i in seen:
+                continue
+            seen.add(i)
+            uniq.append(i)
+        return {
+            "accessoire_ids": uniq,
+            "libre": str(data.get("libre") or "").strip(),
+            "steps": parse_checklist_hivernage(
+                data.get("steps") if isinstance(data.get("steps"), list) else data.get("items")
+            ),
+        }
+    return {"accessoire_ids": [], "libre": "", "steps": []}
+
+
 def parse_options_checklists(raw: Any, *, fallback_hivernage: Any = None) -> dict[str, Any]:
-    """Retourne {option: [{id, label}, ...]} + hivernage_config pour l’UI."""
+    """Retourne {option: [{id, label}, ...]} + configs hivernage / local technique."""
     out: dict[str, Any] = empty_options_checklists()
     data: Any = raw
     if isinstance(raw, str):
@@ -946,10 +1039,15 @@ def parse_options_checklists(raw: Any, *, fallback_hivernage: Any = None) -> dic
         else:
             data = {}
     hiv_raw = None
+    lt_cfg = {"accessoire_ids": [], "libre": "", "steps": []}
     if isinstance(data, dict):
         for key in OPTION_CHECKLIST_KEYS:
             if key == "hivernage":
                 hiv_raw = data.get("hivernage")
+                continue
+            if key == "local_technique":
+                lt_cfg = parse_local_technique_config(data.get(key))
+                out[key] = lt_cfg.get("steps") or []
                 continue
             out[key] = parse_checklist_hivernage(data.get(key))
     hiv_cfg = parse_hivernage_config(hiv_raw, fallback_list=fallback_hivernage)
@@ -957,6 +1055,7 @@ def parse_options_checklists(raw: Any, *, fallback_hivernage: Any = None) -> dic
         hiv_cfg = parse_hivernage_config(None, fallback_list=fallback_hivernage)
     out["hivernage"] = hivernage_steps_for_visite(hiv_cfg)
     out["hivernage_config"] = hiv_cfg
+    out["local_technique_config"] = lt_cfg
     return out
 
 
@@ -965,6 +1064,17 @@ def serialize_options_checklists(data: dict[str, Any] | None) -> str:
     if isinstance(data, dict):
         for key in OPTION_CHECKLIST_KEYS:
             if key == "hivernage":
+                continue
+            if key == "local_technique":
+                if isinstance(data.get("local_technique_config"), dict):
+                    lt = parse_local_technique_config(data.get("local_technique_config"))
+                else:
+                    lt = parse_local_technique_config(data.get("local_technique"))
+                clean["local_technique"] = {
+                    "accessoire_ids": lt["accessoire_ids"],
+                    "libre": lt["libre"],
+                    "steps": lt["steps"],
+                }
                 continue
             clean[key] = parse_checklist_hivernage(data.get(key))
         # Hivernage : objet {mode, commentaire, steps} ou liste legacy
@@ -993,8 +1103,19 @@ def _options_fields_from_body(body: Any, existing: dict[str, Any] | None = None)
             cfg = parse_hivernage_config(hiv_raw)
         else:
             cfg = parse_hivernage_config(None)
+        lt_cfg = parse_local_technique_config(
+            raw_opts.get("local_technique_config")
+            if isinstance(raw_opts.get("local_technique_config"), dict)
+            else raw_opts.get("local_technique")
+        )
         opts_for_ser = {
-            **{k: raw_opts.get(k) or [] for k in OPTION_CHECKLIST_KEYS if k != "hivernage"},
+            **{
+                k: raw_opts.get(k) or []
+                for k in OPTION_CHECKLIST_KEYS
+                if k not in {"hivernage", "local_technique"}
+            },
+            "local_technique_config": lt_cfg,
+            "local_technique": lt_cfg,
             "hivernage_config": cfg,
             "hivernage": {
                 "mode": cfg["mode"],
@@ -1473,6 +1594,38 @@ def normalize_frequence(value: str | None) -> str:
     return ""
 
 
+def normalize_entite(value: str | None) -> str:
+    v = (value or "").strip().lower()
+    if v in {"pro", "professionnel", "professionnelle", "professionel"}:
+        return "pro"
+    return "particulier"
+
+
+def client_display_label(row: dict[str, Any] | None, *, client_id: int | None = None) -> str:
+    if not row:
+        return f"Client #{client_id}" if client_id else "Client"
+    entite = normalize_entite(row.get("entite"))
+    nom = (row.get("nom") or "").strip()
+    prenom = (row.get("prenom") or "").strip()
+    if entite == "pro":
+        name = nom
+    else:
+        name = f"{prenom} {nom}".strip() or nom
+    if name:
+        return name
+    entite_label = "Pro" if entite == "pro" else "Particulier"
+    adresse = (row.get("adresse") or "").strip()
+    if adresse:
+        return f"{entite_label} — {adresse}"
+    cid = client_id
+    if cid is None:
+        try:
+            cid = int(row.get("id") or 0) or None
+        except (TypeError, ValueError):
+            cid = None
+    return f"{entite_label}" + (f" #{cid}" if cid else "")
+
+
 def parse_iso_date(value: str | None) -> datetime | None:
     raw = (value or "").strip()[:10]
     if not raw:
@@ -1533,7 +1686,9 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         "id": int(r["id"]),
         "nom": r.get("nom", ""),
         "prenom": r.get("prenom", ""),
+        "entite": normalize_entite(r.get("entite")),
         "adresse": r.get("adresse", ""),
+        "label": client_display_label(r, client_id=int(r["id"])),
         "latitude": float(r["latitude"]) if r.get("latitude") else None,
         "longitude": float(r["longitude"]) if r.get("longitude") else None,
         "pompe": r.get("pompe", ""),
@@ -1562,7 +1717,13 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
         **(
             lambda opts: {
                 "options_checklists": {
-                    **{k: opts.get(k) or [] for k in OPTION_CHECKLIST_KEYS if k != "hivernage"},
+                    **{
+                        k: opts.get(k) or []
+                        for k in OPTION_CHECKLIST_KEYS
+                        if k not in {"hivernage", "local_technique"}
+                    },
+                    "local_technique": opts.get("local_technique_config")
+                    or {"accessoire_ids": [], "libre": "", "steps": []},
                     # Objet complet (mode + mémoires actif/passif), pas la liste filtrée visite
                     "hivernage": opts.get("hivernage_config")
                     or {
@@ -1573,6 +1734,8 @@ def row_client(r: dict[str, str], *, password_clair: str | None = None) -> dict[
                         "passif_steps": [],
                     },
                 },
+                "local_technique_config": opts.get("local_technique_config")
+                or {"accessoire_ids": [], "libre": "", "steps": []},
                 "hivernage_config": opts.get("hivernage_config")
                 or {
                     "mode": "actif",
@@ -2374,12 +2537,43 @@ def build_checklist(client: dict[str, Any], type_visite: str) -> list[dict[str, 
             "done": False,
         })
 
-    if type_visite == "depannage":
-        add("diagnostic", "Diagnostic / constat")
-        add("intervention", "Intervention effectuée")
-        add("test_final", "Test final")
+    if type_visite == "ouverture":
+        opts = parse_options_checklists(
+            client.get("options_checklists"),
+            fallback_hivernage=client.get("checklist_hivernage"),
+        )
+        steps = opts.get("ouverture") or []
+        if isinstance(steps, dict):
+            steps = steps.get("steps") or []
+        if not isinstance(steps, list):
+            steps = []
+        labeled = [
+            s for s in steps
+            if isinstance(s, dict) and str(s.get("label") or "").strip()
+        ]
+        if labeled:
+            for idx, step in enumerate(labeled, start=1):
+                iid = step.get("id") or slug_checklist_id(step["label"], idx)
+                add(str(iid), str(step["label"]).strip())
+        else:
+            add("remise_en_route", "Remise en route filtration")
+            add("controle_niveau", "Contrôle niveau d'eau")
+            add("controle_local", "Contrôle local technique")
+            add("analyse_ouverture", "Analyse de l'eau", optional=True)
+            add("note_ouverture", "Note de visite", optional=True)
+    elif type_visite == "depannage":
+        # UI dédiée : Début → travaux / fournitures (libre + vocal) → Fin
+        return items
+    elif type_visite == "travaux":
+        # Alias historique → même flux libre que dépannage
+        return items
+    elif type_visite == "fourniture":
         add("fournitures", "Fournitures notées", optional=True)
-        add("note_finale", "Note de visite", optional=True)
+        add("note_fourniture", "Note de visite", optional=True)
+    elif type_visite == "devis":
+        add("besoin", "Besoin / demande client")
+        add("devis", "Devis préparé / chiffrage")
+        add("note_devis", "Note de visite", optional=True)
     elif type_visite == "hivernage":
         steps = parse_checklist_hivernage(client.get("checklist_hivernage"))
         photos_by_inst: dict[str, list[dict[str, Any]]] = {}
@@ -2572,10 +2766,14 @@ async def create_client(body: NouveauClient):
         # Mot de passe géré par Supabase Auth — pas de hash local
         password_hash = ""
 
+    entite = normalize_entite(body.entite)
+    nom = body.nom.strip()
+    prenom = "" if entite == "pro" else body.prenom.strip()
     row = {
         "id": new_id,
-        "nom": body.nom.strip(),
-        "prenom": body.prenom.strip(),
+        "nom": nom,
+        "prenom": prenom,
+        "entite": entite,
         "adresse": body.adresse.strip(),
         "latitude": f"{lat:.6f}",
         "longitude": f"{lon:.6f}",
@@ -2702,9 +2900,13 @@ async def update_client(client_id: int, body: ModifierClient):
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+    entite = normalize_entite(body.entite)
+    nom = body.nom.strip()
+    prenom = "" if entite == "pro" else body.prenom.strip()
     target.update({
-        "nom": body.nom.strip(),
-        "prenom": body.prenom.strip(),
+        "nom": nom,
+        "prenom": prenom,
+        "entite": entite,
         "adresse": body.adresse.strip(),
         "latitude": f"{lat:.6f}",
         "longitude": f"{lon:.6f}",
@@ -3086,7 +3288,7 @@ def _ensure_facture_hivernage(client_id: int, visite_id: int) -> dict[str, str] 
 
 @app.post("/api/visites")
 def create_visite(body: VisiteCreate):
-    if body.type not in {"depannage", "entretien_simple", "entretien_complet", "hivernage"}:
+    if body.type not in VISITE_TYPES:
         raise HTTPException(status_code=400, detail="Type de visite invalide")
     client = None
     for r in read_csv(CLIENTS_CSV):
@@ -3235,6 +3437,7 @@ def fin_prestation(visite_id: int):
     write_one_row(VISITES_CSV, VISITE_FIELDS, r)
 
     facture = None
+    is_ouverture = (r.get("type") or "") == "ouverture"
     if is_hiv:
         cid = int(r["client_id"])
         if complete:
@@ -3242,6 +3445,8 @@ def fin_prestation(visite_id: int):
             facture = _ensure_facture_hivernage(cid, int(r["id"]))
         else:
             _set_client_hivernage_statut(cid, hivernee=False, en_cours=True)
+    elif is_ouverture and complete:
+        _set_client_hivernage_statut(int(r["client_id"]), hivernee=False, en_cours=False)
 
     payload = _visite_payload(r, include_client=False, include_photos=False)
     if is_hiv:
@@ -3374,6 +3579,231 @@ def commande_ia(body: CommandeIA):
         return {"success": True, "intent": "fourniture", "fourniture": row}
 
     return {"success": False, **parsed}
+
+
+def accessoire_public(row: dict[str, str]) -> dict[str, Any]:
+    aid = int(row["id"]) if str(row.get("id", "")).isdigit() else row.get("id")
+    has_notice = bool((row.get("notice_path") or "").strip())
+    return {
+        "id": aid,
+        "categorie": (row.get("categorie") or "").strip(),
+        "marque": (row.get("marque") or "").strip(),
+        "modele": (row.get("modele") or "").strip(),
+        "notice_name": (row.get("notice_name") or "").strip(),
+        "notice_mime": (row.get("notice_mime") or "").strip(),
+        "has_notice": has_notice,
+        "notice_url": f"/api/accessoires/{aid}/notice" if has_notice else None,
+        "created_at": (row.get("created_at") or "").strip(),
+        "label": " · ".join(
+            p
+            for p in (
+                (row.get("categorie") or "").strip(),
+                (row.get("marque") or "").strip(),
+                (row.get("modele") or "").strip(),
+            )
+            if p
+        ),
+    }
+
+
+def _delete_accessoire_notice_file(row: dict[str, str]) -> None:
+    path = (row.get("notice_path") or "").strip()
+    if not path:
+        return
+    if path.startswith("local:"):
+        local = NOTICES_DIR / path[6:]
+        if local.is_file():
+            local.unlink()
+        return
+    if supabase_db.enabled():
+        try:
+            supabase_db.remove_notice_file(path)
+        except Exception:
+            pass
+
+
+@app.get("/api/accessoires")
+def liste_accessoires(categorie: str = "", q: str = ""):
+    all_rows = [accessoire_public(r) for r in read_csv(ACCESSOIRES_CSV)]
+    seen_cats: set[str] = set()
+    cats: list[str] = []
+    for c in ACCESSOIRE_CATEGORIES:
+        key = c.lower()
+        if key in seen_cats:
+            continue
+        seen_cats.add(key)
+        cats.append(c)
+    for r in all_rows:
+        c = (r.get("categorie") or "").strip()
+        if not c:
+            continue
+        key = c.lower()
+        if key in seen_cats:
+            continue
+        seen_cats.add(key)
+        cats.append(c)
+    rows = all_rows
+    cat = (categorie or "").strip().lower()
+    if cat:
+        rows = [r for r in rows if (r.get("categorie") or "").lower() == cat]
+    query = (q or "").strip().lower()
+    if query:
+        rows = [
+            r
+            for r in rows
+            if query in (r.get("label") or "").lower()
+            or query in (r.get("marque") or "").lower()
+            or query in (r.get("modele") or "").lower()
+            or query in (r.get("categorie") or "").lower()
+        ]
+    rows.sort(
+        key=lambda r: (
+            (r.get("categorie") or "").lower(),
+            (r.get("marque") or "").lower(),
+            (r.get("modele") or "").lower(),
+            int(r["id"]) if isinstance(r.get("id"), int) else 0,
+        )
+    )
+    return {
+        "total": len(rows),
+        "categories": cats,
+        "accessoires": rows,
+    }
+
+
+@app.post("/api/accessoires")
+def create_accessoire(body: AccessoireCreate):
+    rows = read_csv(ACCESSOIRES_CSV)
+    aid = next_id(rows)
+    row = {
+        "id": aid,
+        "categorie": body.categorie.strip(),
+        "marque": body.marque.strip(),
+        "modele": (body.modele or "").strip(),
+        "notice_path": "",
+        "notice_name": "",
+        "notice_mime": "",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    rows.append(row)
+    write_csv(ACCESSOIRES_CSV, ACCESSOIRE_FIELDS, rows)
+    return accessoire_public(row)
+
+
+@app.put("/api/accessoires/{accessoire_id}")
+def update_accessoire(accessoire_id: int, body: AccessoireUpdate):
+    rows, row = _find_row(ACCESSOIRES_CSV, accessoire_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Accessoire introuvable")
+    if body.categorie is not None:
+        row["categorie"] = body.categorie.strip()
+    if body.marque is not None:
+        row["marque"] = body.marque.strip()
+    if body.modele is not None:
+        row["modele"] = body.modele.strip()
+    if not row.get("categorie") or not row.get("marque"):
+        raise HTTPException(status_code=400, detail="Catégorie et marque obligatoires.")
+    write_csv(ACCESSOIRES_CSV, ACCESSOIRE_FIELDS, rows)
+    return accessoire_public(row)
+
+
+@app.delete("/api/accessoires/{accessoire_id}")
+def delete_accessoire(accessoire_id: int):
+    rows, row = _find_row(ACCESSOIRES_CSV, accessoire_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Accessoire introuvable")
+    _delete_accessoire_notice_file(row)
+    write_csv(
+        ACCESSOIRES_CSV,
+        ACCESSOIRE_FIELDS,
+        [r for r in rows if int(r["id"]) != accessoire_id],
+    )
+    return {"ok": True, "id": accessoire_id}
+
+
+@app.post("/api/accessoires/{accessoire_id}/notice")
+async def upload_accessoire_notice(accessoire_id: int, file: UploadFile = File(...)):
+    rows, row = _find_row(ACCESSOIRES_CSV, accessoire_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Accessoire introuvable")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Fichier vide.")
+    if len(raw) > MAX_NOTICE_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 12 Mo).")
+    mime = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
+    name = (file.filename or "notice.pdf").strip() or "notice.pdf"
+    ext = Path(name).suffix.lower() or (
+        ".pdf" if "pdf" in mime else ".bin"
+    )
+    if mime not in ALLOWED_NOTICE_MIMES and ext not in {".pdf", ".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(status_code=400, detail="Formats acceptés : PDF, JPG, PNG, WEBP.")
+    if ext == ".pdf":
+        mime = "application/pdf"
+    _delete_accessoire_notice_file(row)
+    storage_name = f"{accessoire_id}_{uuid.uuid4().hex[:10]}{ext}"
+    if supabase_db.enabled():
+        storage_path = storage_name
+        try:
+            supabase_db.upload_notice_bytes(storage_path, raw, mime)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Upload notice : {e}") from e
+    else:
+        dest = NOTICES_DIR / storage_name
+        dest.write_bytes(raw)
+        storage_path = f"local:{storage_name}"
+    row["notice_path"] = storage_path
+    row["notice_name"] = name
+    row["notice_mime"] = mime
+    write_csv(ACCESSOIRES_CSV, ACCESSOIRE_FIELDS, rows)
+    return accessoire_public(row)
+
+
+@app.get("/api/accessoires/{accessoire_id}/notice")
+def download_accessoire_notice(accessoire_id: int):
+    _rows, row = _find_row(ACCESSOIRES_CSV, accessoire_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Accessoire introuvable")
+    path = (row.get("notice_path") or "").strip()
+    if not path:
+        raise HTTPException(status_code=404, detail="Aucune notice")
+    mime = (row.get("notice_mime") or "application/pdf").strip()
+    name = (row.get("notice_name") or "notice.pdf").strip()
+    try:
+        if path.startswith("local:"):
+            local = NOTICES_DIR / path[6:]
+            if not local.is_file():
+                raise HTTPException(status_code=404, detail="Fichier introuvable")
+            data = local.read_bytes()
+        elif supabase_db.enabled():
+            data = supabase_db.download_notice_bytes(path)
+        else:
+            raise HTTPException(status_code=404, detail="Fichier introuvable")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lecture notice : {e}") from e
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'inline; filename="{name}"',
+            "Cache-Control": "private, max-age=3600",
+        },
+    )
+
+
+@app.delete("/api/accessoires/{accessoire_id}/notice")
+def delete_accessoire_notice(accessoire_id: int):
+    rows, row = _find_row(ACCESSOIRES_CSV, accessoire_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Accessoire introuvable")
+    _delete_accessoire_notice_file(row)
+    row["notice_path"] = ""
+    row["notice_name"] = ""
+    row["notice_mime"] = ""
+    write_csv(ACCESSOIRES_CSV, ACCESSOIRE_FIELDS, rows)
+    return accessoire_public(row)
 
 
 def _find_row(path: Path, item_id: int) -> tuple[list[dict[str, str]], dict[str, str] | None]:
@@ -3588,8 +4018,7 @@ def _facture_enrichie(
         "client_id": cid,
         "client_nom": (client.get("nom") or "").strip(),
         "client_prenom": (client.get("prenom") or "").strip(),
-        "client_label": f"{(client.get('nom') or '').strip()} {(client.get('prenom') or '').strip()}".strip()
-        or f"Client #{cid}",
+        "client_label": client_display_label(client, client_id=cid),
         "date": (row.get("date") or "")[:10],
         "date_ref": (row.get("date_ref") or "")[:10],
         "description": row.get("description") or "",
@@ -3659,7 +4088,8 @@ def dashboard_overview():
             "id": cid,
             "nom": c["nom"],
             "prenom": c["prenom"],
-            "label": f'{c["prenom"]} {c["nom"]}'.strip(),
+            "entite": c.get("entite") or "particulier",
+            "label": c.get("label") or client_display_label(c, client_id=cid),
             "adresse": c["adresse"],
             "piscine_hivernee": bool(c.get("piscine_hivernee")),
             "hivernage_en_cours": bool(c.get("hivernage_en_cours")),
@@ -3671,7 +4101,7 @@ def dashboard_overview():
             "prochain_passage": c.get("prochain_passage"),
         })
 
-    rows.sort(key=lambda x: (x["nom"] or "").lower())
+    rows.sort(key=lambda x: (x["label"] or "").lower())
     hivernees = sum(1 for x in rows if x["piscine_hivernee"])
     en_cours = sum(1 for x in rows if x["hivernage_en_cours"] and not x["piscine_hivernee"])
     avec_impayes = sum(1 for x in rows if x["a_impaye"])
@@ -3742,10 +4172,7 @@ def liste_bons(
         if client_id is not None and cid != int(client_id):
             continue
         client = clients_by_id.get(cid) or {}
-        label = (
-            f"{(client.get('nom') or '').strip()} {(client.get('prenom') or '').strip()}".strip()
-            or f"Client #{cid}"
-        )
+        label = client_display_label(client, client_id=cid)
         query = (q or "").strip().lower()
         if query and query not in label.lower() and query not in (v.get("type") or "").lower():
             continue
@@ -4057,6 +4484,7 @@ def admin_init_supabase():
             "analyses": (ANALYSES_CSV, ANALYSE_FIELDS, _csv_read_local),
             "fournitures": (FOURNITURES_CSV, FOURNITURE_FIELDS, _csv_read_local),
             "visites": (VISITES_CSV, VISITE_FIELDS, _csv_read_local),
+            "accessoires": (ACCESSOIRES_CSV, ACCESSOIRE_FIELDS, _csv_read_local),
         }
     )
     return {

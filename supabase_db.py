@@ -22,6 +22,7 @@ TABLE_BY_CSV = {
     "fournitures.csv": "fournitures",
     "analyses.csv": "analyses",
     "visites.csv": "visites",
+    "accessoires.csv": "accessoires",
 }
 
 INT_FIELDS = {"id", "client_id"}  # visite_id reste texte (CSV / legacy)
@@ -546,17 +547,30 @@ def init_supabase(
             "alter table public.clients add column if not exists options_checklists text default '{}';"
         )
     try:
+        get_client().table("clients").select("entite").limit(1).execute()
+    except Exception:
+        logger.info("Colonne entite absente → ajout…")
+        _ensure_column_via_db(
+            "alter table public.clients add column if not exists entite text default 'particulier';"
+        )
+    try:
         get_client().table("fournitures").select("visite_id").limit(1).execute()
     except Exception:
         logger.info("Colonne fournitures.visite_id absente → ajout…")
         _ensure_column_via_db(
             "alter table public.fournitures add column if not exists visite_id text default '';"
         )
+    try:
+        get_client().table("accessoires").select("id").limit(1).execute()
+    except Exception:
+        logger.info("Table accessoires absente → ré-application schéma…")
+        apply_schema()
     ensure_photos_bucket()
+    ensure_notices_bucket()
 
     if csv_seed:
         try:
-            order = ["clients", "notes", "analyses", "fournitures", "visites"]
+            order = ["clients", "notes", "analyses", "fournitures", "visites", "accessoires"]
             ordered = {k: csv_seed[k] for k in order if k in csv_seed}
             seed_from_csv_if_empty(ordered)
         except Exception as e:
@@ -657,6 +671,90 @@ def ensure_photos_bucket() -> None:
             PHOTOS_BUCKET,
             e,
         )
+
+
+NOTICES_BUCKET = "notices-accessoires"
+
+
+def _ensure_notices_bucket_via_db() -> bool:
+    sql = """
+    insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+    values (
+      'notices-accessoires',
+      'notices-accessoires',
+      false,
+      15728640,
+      array['application/pdf', 'image/jpeg', 'image/png', 'image/webp', 'application/octet-stream']
+    )
+    on conflict (id) do update set
+      public = excluded.public,
+      file_size_limit = excluded.file_size_limit,
+      allowed_mime_types = excluded.allowed_mime_types;
+    """
+    ok = _ensure_column_via_db(sql)
+    if ok:
+        logger.info("Bucket Storage assuré via Postgres : %s", NOTICES_BUCKET)
+    return ok
+
+
+def ensure_notices_bucket() -> None:
+    if not enabled():
+        return
+    if _ensure_notices_bucket_via_db():
+        return
+    try:
+        sb = _storage_sb()
+        existing = sb.storage.list_buckets()
+        names = set()
+        for b in existing or []:
+            name = getattr(b, "name", None) or getattr(b, "id", None)
+            if isinstance(b, dict):
+                name = b.get("name") or b.get("id")
+            if name:
+                names.add(str(name))
+        if NOTICES_BUCKET in names:
+            return
+        sb.storage.create_bucket(
+            NOTICES_BUCKET,
+            options={
+                "public": False,
+                "file_size_limit": 15 * 1024 * 1024,
+                "allowed_mime_types": [
+                    "application/pdf",
+                    "image/jpeg",
+                    "image/png",
+                    "image/webp",
+                    "application/octet-stream",
+                ],
+            },
+        )
+        logger.info("Bucket Storage créé : %s", NOTICES_BUCKET)
+    except Exception as e:
+        logger.warning("Bucket %s non créé : %s", NOTICES_BUCKET, e)
+
+
+def upload_notice_bytes(storage_path: str, data: bytes, mime: str) -> None:
+    sb = _storage_sb()
+    sb.storage.from_(NOTICES_BUCKET).upload(
+        storage_path,
+        data,
+        file_options={"content-type": mime or "application/pdf", "upsert": "true"},
+    )
+
+
+def download_notice_bytes(storage_path: str) -> bytes:
+    sb = _storage_sb()
+    return sb.storage.from_(NOTICES_BUCKET).download(storage_path)
+
+
+def remove_notice_file(storage_path: str) -> None:
+    if not storage_path:
+        return
+    try:
+        sb = _storage_sb()
+        sb.storage.from_(NOTICES_BUCKET).remove([storage_path])
+    except Exception as e:
+        logger.warning("Suppression notice %s : %s", storage_path, e)
 
 
 def list_photos(client_id: int | None = None, instruction_id: str | None = None) -> list[dict[str, Any]]:
