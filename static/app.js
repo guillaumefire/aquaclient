@@ -1704,6 +1704,10 @@
       el.hidden = !on;
       el.style.display = on ? "" : "none";
     });
+    const back = $("#btn-back-type");
+    if (back) {
+      back.textContent = typeMenuLevel === "root" ? "← Clients" : "← Retour";
+    }
     const meta = $("#type-client-meta");
     if (meta) {
       if (typeMenuLevel === "entretien") meta.textContent = "Entretien — choisissez le type";
@@ -1975,15 +1979,20 @@
             .join(" · ") || "Que souhaitez-vous faire ?";
         }
       }
+      const back = $("#btn-back-type");
+      if (back) back.textContent = "← Clients";
       return;
     }
-    if (clientActif) show("confirm");
-    else show("home");
+    show("liste");
+    chargerListe().catch(() => {});
   });
 
   $("#btn-back-visite")?.addEventListener("click", () => {
     if (clientActif) showTypeMenu(clientActif);
-    else show("home");
+    else {
+      show("liste");
+      chargerListe().catch(() => {});
+    }
   });
 
   $$("[data-action]").forEach((btn) => {
@@ -2013,16 +2022,6 @@
       if (!clientActif) return;
       ouvrirVisite(clientActif, btn.dataset.visite);
     });
-  });
-
-  $("#btn-depannage-visite")?.addEventListener("click", async () => {
-    if (!clientActif) return;
-    await ouvrirVisite(clientActif, "depannage");
-  });
-
-  $("#btn-hivernage-visite")?.addEventListener("click", async () => {
-    if (!clientActif) return;
-    await ouvrirVisite(clientActif, "hivernage");
   });
 
   $("#btn-add-option-step")?.addEventListener("click", () => {
@@ -3615,10 +3614,6 @@
     $("#visite-adresse").textContent = [entiteLabel(c), c.adresse || ""]
       .filter(Boolean)
       .join(" · ");
-    const btnDep = $("#btn-depannage-visite");
-    if (btnDep) btnDep.hidden = true;
-    const btnHiv = $("#btn-hivernage-visite");
-    if (btnHiv) btnHiv.hidden = true;
     await ensureAccessoiresLoaded().catch(() => {});
     renderEquip(c);
     renderChrono(visite);

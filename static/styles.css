@@ -1006,13 +1006,6 @@ body:has(#screen-home.screen--active) .brand-tag {
   margin: 0;
 }
 
-.visite-top-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-  margin-left: auto;
-}
-
 .btn--sm {
   padding: 0.45rem 0.85rem;
   font-size: 0.85rem;

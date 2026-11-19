@@ -32,7 +32,7 @@ load_dotenv(Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO)
 
 # Incrémenter à chaque déploiement visible (PC + téléphone / Render doivent afficher la même)
-APP_VERSION = "1.15.1"
+APP_VERSION = "1.15.2"
 
 PHOTOS_BUCKET = "photos-clients"
 NOTICES_BUCKET = "notices-accessoires"
